@@ -5,6 +5,24 @@
       <button @click="switchTurn" class="btn">手番切り替え</button>
     </div>
 
+    <!-- 後手持ち駒 -->
+    <div class="hand white-hand">
+      <div class="hand-label">後手持ち駒</div>
+      <div class="hand-pieces">
+        <div
+          v-for="(count, type) in handsWithCount('white')"
+          :key="type"
+          :class="['hand-piece', 'owner-white', { selected: selectedHandPiece === type && boardState.turn === 'white' }]"
+          @click="selectHandPiece(toPieceType(type))"
+          draggable="true"
+          @dragstart="onHandDragStart(toPieceType(type))"
+        >
+          <span class="hand-piece-name">{{ PIECE_NAMES[toPieceType(type)] }}</span>
+          <span class="hand-piece-count">{{ count }}</span>
+        </div>
+      </div>
+    </div>
+
     <div class="board-wrapper">
       <!-- 列番号（9-1） -->
       <div class="column-labels">
@@ -70,6 +88,24 @@
       </div>
     </div>
 
+    <!-- 先手持ち駒 -->
+    <div class="hand black-hand">
+      <div class="hand-label">先手持ち駒</div>
+      <div class="hand-pieces">
+        <div
+          v-for="(count, type) in handsWithCount('black')"
+          :key="type"
+          :class="['hand-piece', 'owner-black', { selected: selectedHandPiece === type && boardState.turn === 'black' }]"
+          @click="selectHandPiece(toPieceType(type))"
+          draggable="true"
+          @dragstart="onHandDragStart(toPieceType(type))"
+        >
+          <span class="hand-piece-name">{{ PIECE_NAMES[toPieceType(type)] }}</span>
+          <span class="hand-piece-count">{{ count }}</span>
+        </div>
+      </div>
+    </div>
+
     <div class="board-controls">
       <button @click="resetInitialPosition" class="btn">
         初期局面に戻す
@@ -83,7 +119,7 @@ import { ref, watch } from 'vue'
 import type { BoardState, Piece, PieceType } from '../types/shogi'
 import { createInitialBoard } from '../utils/boardSetup'
 import { getValidMoves, canPromote, type Position } from '../utils/moveRules'
-import { moveToNotation } from '../utils/moveNotation'
+import { moveToNotation, coordinatesToNotation } from '../utils/moveNotation'
 
 interface Props {
   initialBoard?: BoardState
@@ -104,6 +140,7 @@ interface MoveInfo {
 interface Emits {
   (e: 'update:board', value: BoardState): void
   (e: 'move', value: MoveInfo): void
+  (e: 'reset'): void
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -140,6 +177,110 @@ const draggedRow = ref<number | null>(null)
 const draggedCol = ref<number | null>(null)
 const showPromoteDialog = ref(false)
 const pendingMove = ref<{ fromRow: number; fromCol: number; toRow: number; toCol: number } | null>(null)
+const selectedHandPiece = ref<PieceType | null>(null)
+const draggedHandPiece = ref<PieceType | null>(null)
+
+// string → PieceType キャスト用ヘルパー（テンプレートから使用）
+const toPieceType = (t: string): PieceType => t as PieceType
+
+// 持ち駒のうち枚数が1以上のものを返す
+const handsWithCount = (owner: 'black' | 'white'): Partial<Record<PieceType, number>> => {
+  const hand = boardState.value.hands[owner]
+  const result: Partial<Record<PieceType, number>> = {}
+  for (const key of Object.keys(hand) as PieceType[]) {
+    if (hand[key] > 0) result[key] = hand[key]
+  }
+  return result
+}
+
+// 持ち駒を選択（打ちの準備）
+const selectHandPiece = (pieceType: PieceType) => {
+  if (!props.editable) return
+  if (boardState.value.hands[boardState.value.turn][pieceType] <= 0) return
+
+  if (selectedHandPiece.value === pieceType) {
+    selectedHandPiece.value = null
+    validMoves.value = []
+  } else {
+    selectedHandPiece.value = pieceType
+    selectedRow.value = null
+    selectedCol.value = null
+    validMoves.value = getDropMoves(pieceType, boardState.value.turn)
+  }
+}
+
+// 打てるマスを返す
+const getDropMoves = (pieceType: PieceType, owner: 'black' | 'white'): Position[] => {
+  const moves: Position[] = []
+  for (let row = 0; row < 9; row++) {
+    for (let col = 0; col < 9; col++) {
+      if (boardState.value.board[row][col] !== null) continue
+
+      // 歩・香：最奥段禁止
+      if (pieceType === 'pawn' || pieceType === 'lance') {
+        if (owner === 'black' && row === 0) continue
+        if (owner === 'white' && row === 8) continue
+      }
+      // 桂：最奥2段禁止
+      if (pieceType === 'knight') {
+        if (owner === 'black' && row <= 1) continue
+        if (owner === 'white' && row >= 7) continue
+      }
+      // 二歩チェック
+      if (pieceType === 'pawn') {
+        let hasPawn = false
+        for (let r = 0; r < 9; r++) {
+          const p = boardState.value.board[r][col]
+          if (p && p.type === 'pawn' && !p.promoted && p.owner === owner) {
+            hasPawn = true
+            break
+          }
+        }
+        if (hasPawn) continue
+      }
+
+      moves.push({ row, col })
+    }
+  }
+  return moves
+}
+
+// 持ち駒を盤上に打つ
+const dropPiece = (pieceType: PieceType, owner: 'black' | 'white', toRow: number, toCol: number) => {
+  if (boardState.value.hands[owner][pieceType] <= 0) return
+
+  boardState.value.hands[owner][pieceType]--
+  boardState.value.board[toRow][toCol] = { type: pieceType, owner, promoted: false }
+
+  const notation = `${owner === 'black' ? '▲' : '△'}${coordinatesToNotation(toRow, toCol)}${PIECE_NAMES[pieceType]}打`
+  const isCheck = checkForCheck(toRow, toCol)
+  playPieceSound(isCheck)
+
+  emit('move', {
+    notation,
+    fromRow: -1,
+    fromCol: -1,
+    toRow,
+    toCol,
+    piece: { type: pieceType, owner, promoted: false },
+    captured: null,
+    promoted: false,
+  })
+
+  boardState.value.turn = boardState.value.turn === 'black' ? 'white' : 'black'
+  selectedHandPiece.value = null
+  draggedHandPiece.value = null
+  validMoves.value = []
+  emit('update:board', boardState.value)
+}
+
+// 持ち駒のドラッグ開始
+const onHandDragStart = (pieceType: PieceType) => {
+  if (!props.editable) return
+  if (boardState.value.hands[boardState.value.turn][pieceType] <= 0) return
+  draggedHandPiece.value = pieceType
+  validMoves.value = getDropMoves(pieceType, boardState.value.turn)
+}
 
 const isSelected = (row: number, col: number) => {
   return selectedRow.value === row && selectedCol.value === col
@@ -156,15 +297,24 @@ const isHighlighted = (row: number, col: number) => {
 const selectSquare = (row: number, col: number) => {
   if (!props.editable) return
 
+  // 持ち駒が選択中の場合：打ち
+  if (selectedHandPiece.value !== null) {
+    if (isValidMove(row, col)) {
+      dropPiece(selectedHandPiece.value, boardState.value.turn, row, col)
+    } else {
+      selectedHandPiece.value = null
+      validMoves.value = []
+    }
+    return
+  }
+
   const clickedPiece = boardState.value.board[row][col]
 
-  // 駒が選択されている場合
+  // 盤上の駒が選択されている場合
   if (selectedRow.value !== null && selectedCol.value !== null) {
-    // 有効な移動先がクリックされた場合
     if (isValidMove(row, col)) {
       const piece = boardState.value.board[selectedRow.value][selectedCol.value]
       if (piece && canPromote(piece, selectedRow.value, row)) {
-        // 成れる場合は選択ダイアログを表示
         pendingMove.value = {
           fromRow: selectedRow.value,
           fromCol: selectedCol.value,
@@ -173,7 +323,6 @@ const selectSquare = (row: number, col: number) => {
         }
         showPromoteDialog.value = true
       } else {
-        // 成れない場合は通常移動
         movePiece(selectedRow.value, selectedCol.value, row, col)
       }
       return
@@ -184,9 +333,9 @@ const selectSquare = (row: number, col: number) => {
   if (clickedPiece && clickedPiece.owner === boardState.value.turn) {
     selectedRow.value = row
     selectedCol.value = col
+    selectedHandPiece.value = null
     validMoves.value = getValidMoves(boardState.value.board, row, col)
   } else {
-    // それ以外は選択解除
     selectedRow.value = null
     selectedCol.value = null
     validMoves.value = []
@@ -219,7 +368,19 @@ const onDragOver = (row: number, col: number) => {
 }
 
 const onDrop = (row: number, col: number) => {
-  if (!props.editable || draggedRow.value === null || draggedCol.value === null) return
+  if (!props.editable) return
+
+  // 持ち駒のドロップ
+  if (draggedHandPiece.value !== null) {
+    if (isValidMove(row, col)) {
+      dropPiece(draggedHandPiece.value, boardState.value.turn, row, col)
+    }
+    draggedHandPiece.value = null
+    validMoves.value = []
+    return
+  }
+
+  if (draggedRow.value === null || draggedCol.value === null) return
 
   // 有効な移動先かチェック
   const isValid = validMoves.value.some(move => move.row === row && move.col === col)
@@ -273,6 +434,12 @@ const movePiece = (fromRow: number, fromCol: number, toRow: number, toCol: numbe
   // 駒を移動
   boardState.value.board[toRow][toCol] = piece
   boardState.value.board[fromRow][fromCol] = null
+
+  // 取った駒を持ち駒に追加（成り駒は元の種類に戻す）
+  if (capturedPiece) {
+    const baseType = capturedPiece.type  // 成り駒でも type は元の種類
+    boardState.value.hands[piece.owner][baseType]++
+  }
 
   // 王手かチェック
   const isCheck = checkForCheck(toRow, toCol)
@@ -501,6 +668,7 @@ const resetInitialPosition = () => {
   selectedRow.value = null
   selectedCol.value = null
   emit('update:board', boardState.value)
+  emit('reset')
 }
 
 const switchTurn = () => {
@@ -853,5 +1021,78 @@ const getRowLabel = (rowIndex: number): string => {
   font-size: 14px;
   font-weight: bold;
   color: #666;
+}
+
+/* 持ち駒エリア */
+.hand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: #f5efe0;
+  border: 1px solid #c8a96e;
+  border-radius: 4px;
+  min-height: 52px;
+  width: fit-content;
+}
+
+.hand-label {
+  font-size: 13px;
+  font-weight: bold;
+  color: #555;
+  white-space: nowrap;
+}
+
+.hand-pieces {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.hand-piece {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 46px;
+  cursor: pointer;
+  border: 2px solid transparent;
+  border-radius: 4px;
+  clip-path: polygon(50% 0%, 100% 25%, 100% 100%, 0% 100%, 0% 25%);
+  box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+  transition: transform 0.1s;
+  position: relative;
+}
+
+.hand-piece:hover {
+  transform: scale(1.08);
+}
+
+.hand-piece.selected {
+  outline: 3px solid #2ecc71;
+  outline-offset: 2px;
+}
+
+.hand-piece.owner-black {
+  background: linear-gradient(135deg, #8b7355 0%, #d4a373 50%, #8b7355 100%);
+}
+
+.hand-piece.owner-white {
+  background: linear-gradient(135deg, #f5deb3 0%, #faf0e6 50%, #f5deb3 100%);
+}
+
+.hand-piece-name {
+  font-size: 16px;
+  font-weight: 900;
+  font-family: "Hiragino Mincho ProN", "Yu Mincho", "MS Mincho", serif;
+  line-height: 1;
+}
+
+.hand-piece-count {
+  font-size: 11px;
+  font-weight: bold;
+  color: #333;
+  line-height: 1;
 }
 </style>

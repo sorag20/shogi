@@ -1,9 +1,9 @@
 <template>
   <div class="evaluation-display">
     <div class="evaluation-header">
-      <h3>AI評価値</h3>
+      <h3>評価値</h3>
       <button @click="requestEvaluation" class="btn btn-sm" :disabled="isLoading">
-        {{ isLoading ? '計算中...' : '評価値を取得' }}
+        {{ isLoading ? '計算中...' : '更新' }}
       </button>
     </div>
 
@@ -12,52 +12,45 @@
     <ErrorMessage v-if="error" :error="error" @dismiss="error = null" />
 
     <div v-if="evaluation !== null && !isLoading" class="evaluation-result">
+      <div class="bar-wrapper">
+        <div class="bar-label">後手</div>
+        <div class="eval-bar">
+          <div class="eval-fill" :style="fillStyle"></div>
+        </div>
+        <div class="bar-label">先手</div>
+      </div>
       <div class="evaluation-value">
-        <span class="label">評価値:</span>
-        <span :class="['value', evaluationClass]">
-          {{ formatEvaluation(evaluation) }}
-        </span>
+        <span :class="['value', evaluationClass]">{{ formattedValue }}</span>
       </div>
-
       <div v-if="bestMove" class="best-move">
-        <span class="label">最善手:</span>
-        <span class="value">{{ bestMove }}</span>
+        <span class="best-move-label">最善手</span>
+        <span class="best-move-value">{{ bestMove }}</span>
       </div>
-
-      <div v-if="pv && pv.length > 0" class="pv">
-        <span class="label">主要変化:</span>
-        <span class="value">{{ pv.join(' → ') }}</span>
-      </div>
-
-      <div class="computed-at">
-        <small>計算時刻: {{ computedAt }}</small>
+      <div v-else-if="bestMove === null" class="best-move">
+        <span class="best-move-label">最善手</span>
+        <span class="best-move-none">なし（詰み）</span>
       </div>
     </div>
 
     <div v-else-if="!isLoading && evaluation === null" class="no-evaluation">
-      <p>評価値を取得するには「評価値を取得」ボタンをクリックしてください</p>
+      <p>「更新」ボタンで評価値を計算します</p>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import { evaluationApi } from '../api'
 import { LoadingSpinner, ErrorMessage } from './index'
+import type { BoardState } from '../types/shogi'
 
 interface Props {
-  position?: {
-    board: any
-    turn: 'black' | 'white'
-  }
+  board?: BoardState
 }
 
 const props = defineProps<Props>()
 
 const evaluation = ref<number | null>(null)
-const bestMove = ref<string | null>(null)
-const pv = ref<string[]>([])
-const computedAt = ref<string>('')
+const bestMove = ref<string | null | undefined>(undefined) // undefined=未取得, null=なし, string=手
 const isLoading = ref(false)
 const error = ref<string | null>(null)
 
@@ -68,12 +61,23 @@ const evaluationClass = computed(() => {
   return 'neutral'
 })
 
-const formatEvaluation = (value: number): string => {
-  return value > 0 ? `+${value.toFixed(2)}` : value.toFixed(2)
-}
+const formattedValue = computed(() => {
+  if (evaluation.value === null) return ''
+  const v = evaluation.value
+  return v > 0 ? `先手 +${v.toFixed(0)}` : v < 0 ? `後手 +${Math.abs(v).toFixed(0)}` : '互角'
+})
+
+// バーの塗り幅: 先手有利なら右側が広くなる (0%=後手圧勝, 50%=互角, 100%=先手圧勝)
+const fillStyle = computed(() => {
+  if (evaluation.value === null) return { width: '50%' }
+  // clamp to [-1000, 1000]
+  const clamped = Math.max(-1000, Math.min(1000, evaluation.value))
+  const pct = ((clamped + 1000) / 2000) * 100
+  return { width: `${pct}%` }
+})
 
 const requestEvaluation = async () => {
-  if (!props.position) {
+  if (!props.board) {
     error.value = '局面が設定されていません'
     return
   }
@@ -82,13 +86,29 @@ const requestEvaluation = async () => {
   error.value = null
 
   try {
-    const result = await evaluationApi.evaluate(props.position)
-    evaluation.value = result.evaluation
-    bestMove.value = result.best_move || null
-    pv.value = result.pv || []
-    computedAt.value = new Date(result.computed_at).toLocaleString('ja-JP')
-  } catch (err) {
-    error.value = err instanceof Error ? err.message : '評価値の取得に失敗しました'
+    const [evalRes, moveRes] = await Promise.all([
+      fetch('http://localhost:5001/api/evaluate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ board: props.board }),
+      }),
+      fetch('http://localhost:5001/api/best-move', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ board: props.board }),
+      }),
+    ])
+
+    const evalData = await evalRes.json()
+    if (!evalRes.ok) throw new Error(evalData.message || '評価値の取得に失敗しました')
+    evaluation.value = evalData.evaluation
+
+    const moveData = await moveRes.json()
+    bestMove.value = moveRes.ok ? (moveData.best_move ?? null) : null
+  } catch (err: any) {
+    error.value = err.message || '評価値の取得に失敗しました'
   } finally {
     isLoading.value = false
   }
@@ -97,7 +117,7 @@ const requestEvaluation = async () => {
 
 <style scoped>
 .evaluation-display {
-  padding: 15px;
+  padding: 12px;
   background-color: white;
   border-radius: 4px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
@@ -107,91 +127,100 @@ const requestEvaluation = async () => {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 15px;
+  margin-bottom: 10px;
 }
 
 .evaluation-header h3 {
   margin: 0;
-  font-size: 16px;
+  font-size: 15px;
   color: #2c3e50;
 }
 
-.evaluation-result {
+.bar-wrapper {
   display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.evaluation-value,
-.best-move,
-.pv {
-  display: flex;
-  gap: 10px;
   align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
 }
 
-.label {
-  font-weight: bold;
+.bar-label {
+  font-size: 11px;
   color: #666;
-  min-width: 80px;
+  white-space: nowrap;
+}
+
+.eval-bar {
+  flex: 1;
+  height: 16px;
+  background: #e74c3c;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.eval-fill {
+  height: 100%;
+  background: #2980b9;
+  transition: width 0.4s ease;
+}
+
+.evaluation-value {
+  text-align: center;
 }
 
 .value {
-  font-size: 14px;
-  color: #333;
-}
-
-.value.positive {
-  color: #27ae60;
+  font-size: 15px;
   font-weight: bold;
 }
 
-.value.negative {
+.value.positive { color: #2980b9; }
+.value.negative { color: #e74c3c; }
+.value.neutral  { color: #27ae60; }
+
+.best-move {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 6px 8px;
+  background: #f0f4f8;
+  border-radius: 4px;
+}
+
+.best-move-label {
+  font-size: 11px;
+  color: #666;
+  white-space: nowrap;
+}
+
+.best-move-value {
+  font-size: 15px;
+  font-weight: bold;
+  color: #2c3e50;
+  font-family: "Hiragino Mincho ProN", "Yu Mincho", serif;
+}
+
+.best-move-none {
+  font-size: 13px;
   color: #e74c3c;
-  font-weight: bold;
-}
-
-.value.neutral {
-  color: #3498db;
-}
-
-.computed-at {
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px solid #eee;
-  color: #999;
-  font-size: 12px;
 }
 
 .no-evaluation {
-  padding: 20px;
   text-align: center;
   color: #999;
-  font-size: 13px;
+  font-size: 12px;
+  padding: 10px 0;
 }
 
 .btn {
-  padding: 6px 12px;
+  padding: 5px 10px;
   background-color: #3498db;
   color: white;
   border: none;
   border-radius: 4px;
   cursor: pointer;
   font-size: 12px;
-  transition: background-color 0.3s;
 }
 
-.btn:hover:not(:disabled) {
-  background-color: #2980b9;
-}
-
-.btn:disabled {
-  background-color: #bdc3c7;
-  cursor: not-allowed;
-}
-
-.btn-sm {
-  padding: 6px 10px;
-  font-size: 12px;
-}
+.btn:hover:not(:disabled) { background-color: #2980b9; }
+.btn:disabled { background-color: #bdc3c7; cursor: not-allowed; }
 </style>

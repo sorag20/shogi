@@ -69,9 +69,11 @@
                 :editable="true"
                 @update:board="onBoardUpdate"
                 @move="onMove"
+                @reset="resetFreeMode"
               />
             </div>
             <div class="side-section">
+              <EvaluationDisplay :board="freeModeBoard || undefined" />
               <MoveHistory
                 :moves="freeModeHistory"
                 :current-move="freeModeCurrentMove"
@@ -128,7 +130,7 @@
 
 <script setup lang="ts">
 import { ref, watch, onMounted } from 'vue'
-import { LoadingSpinner, ErrorMessage, Board, ReplayControls, KifUploader, MoveHistory, LoginForm } from './components'
+import { LoadingSpinner, ErrorMessage, Board, ReplayControls, KifUploader, MoveHistory, LoginForm, EvaluationDisplay } from './components'
 import type { BoardState } from './types/shogi'
 
 const STORAGE_KEY = 'shogi-app-state'
