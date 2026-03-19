@@ -108,8 +108,10 @@ def attacks(board,y,x,player):
     return moves
 
 def in_check(board,player):
-
-    ky,kx = find_king(board,player)
+    result = find_king(board, player)
+    if result is None:
+        return True  # 玉が盤上にない = 取られた
+    ky, kx = result
     for y in range(9):
         for x in range(9):
             if board[y][x]*player<0:

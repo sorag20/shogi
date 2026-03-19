@@ -127,5 +127,162 @@ def train(num_games=500, epochs=20, lr=0.001, batch_size=64):
     return model
 
 
+def self_play_game(model_fn, max_moves=150, gamma=0.95, epsilon=0.1):
+    """
+    自己対局を1局行い (局面, TDターゲット) のリストを返す。
+
+    model_fn(board) : numpy配列の局面を受け取り、先手視点の評価値(float)を返す関数
+    gamma           : 割引率（終盤の手ほど報酬が大きく反映される）
+    epsilon         : ε-greedy の探索率（ランダム手の確率）
+    """
+    from evaluate import legal_moves, play, initial
+
+    board = initial.copy()
+    player = 1
+    history = []   # (board_array, player) を記録
+    result = 0     # 先手視点の最終結果: +1=先手勝, -1=後手勝, 0=引き分け
+
+    for _ in range(max_moves):
+        moves = legal_moves(board, player)
+        if not moves:
+            # 合法手なし = 現プレイヤーの負け
+            result = -player   # 先手視点: 先手が詰まれたら -1
+            break
+
+        # ε-greedy: 確率 ε でランダム手、それ以外はモデルの最善手
+        if random.random() < epsilon:
+            move = random.choice(moves)
+        else:
+            best_m, best_v = None, -float('inf')
+            for m in moves:
+                nb = play(board, m)
+                v = model_fn(nb) * player   # 現プレイヤー視点に変換
+                if v > best_v:
+                    best_v, best_m = v, m
+            move = best_m
+
+        history.append(board.copy())
+        board = play(board, move)
+        player = -player
+    # max_moves に達した場合は result=0（引き分け）のまま
+
+    # TD ターゲット: 終局から遡るにつれ割引
+    T = len(history)
+    samples = []
+    for t, state in enumerate(history):
+        discount = gamma ** (T - t - 1)
+        target = result * discount            # 先手視点の割引済み報酬 ∈ [-1, 1]
+        samples.append((state, float(target)))
+
+    return samples, result
+
+
+def reinforce_train(
+    num_epochs=10,
+    games_per_epoch=100,
+    lr=0.0001,
+    gamma=0.95,
+    epsilon_start=0.3,
+    epsilon_end=0.05,
+    batch_size=64,
+):
+    """
+    TD学習による強化学習。
+    教師あり学習済みの model.pth を出発点として、自己対局で追加学習する。
+
+    num_epochs      : 強化学習のエポック数
+    games_per_epoch : 1エポックあたりの自己対局数
+    lr              : 学習率（教師あり学習より小さめ推奨）
+    gamma           : 割引率
+    epsilon_start/end: ε-greedy の探索率（エポックごとに線形減衰）
+    """
+    from evaluate import Net, tensor, LABEL_SCALE
+
+    model_path = os.path.join(os.path.dirname(__file__), 'model.pth')
+
+    # 教師あり学習済みモデルを出発点にする
+    model = Net()
+    if os.path.exists(model_path):
+        model.load_state_dict(torch.load(model_path, map_location='cpu'))
+        print("[RL] 教師あり学習済みモデルを読み込みました")
+    else:
+        print("[RL] Warning: model.pth が見つかりません。ランダム重みから開始します")
+
+    model.train()
+    optimizer = torch.optim.SGD(model.parameters(), lr=lr)
+    criterion = nn.MSELoss()
+
+    # モデルの推論関数（自己対局内で使用）
+    def model_fn(board_arr):
+        with torch.no_grad():
+            return model(tensor(board_arr)).item() * LABEL_SCALE
+
+    print(f"=== 強化学習開始 (epochs={num_epochs}, games/epoch={games_per_epoch}) ===")
+
+    for epoch in range(1, num_epochs + 1):
+        # ε を線形に減衰
+        epsilon = epsilon_start + (epsilon_end - epsilon_start) * (epoch - 1) / max(num_epochs - 1, 1)
+
+        all_states, all_targets = [], []
+        win = draw = loss = 0
+
+        for _ in range(games_per_epoch):
+            samples, result = self_play_game(model_fn, gamma=gamma, epsilon=epsilon)
+            for state, target in samples:
+                all_states.append(state.flatten().astype(np.float32))
+                all_targets.append([target])   # ターゲットは [-1, 1] スケール
+            if result > 0:
+                win += 1
+            elif result < 0:
+                loss += 1
+            else:
+                draw += 1
+
+        if not all_states:
+            continue
+
+        X = torch.tensor(np.array(all_states))
+        # ターゲットは [-1,1] → 教師あり学習と同じく LABEL_SCALE で割らない
+        # （モデル出力は raw 値 ≒ 教師あり学習では label/LABEL_SCALE に合わせてある）
+        y = torch.tensor(np.array(all_targets, dtype=np.float32))
+
+        # シャッフル
+        perm = torch.randperm(len(X))
+        X, y = X[perm], y[perm]
+
+        total_loss, num_batches = 0.0, 0
+        for i in range(0, len(X), batch_size):
+            xb, yb = X[i:i + batch_size], y[i:i + batch_size]
+            optimizer.zero_grad()
+            pred = model(xb)
+            loss_val = criterion(pred, yb)
+            loss_val.backward()
+            optimizer.step()
+            total_loss += loss_val.item()
+            num_batches += 1
+
+        avg_loss = total_loss / max(num_batches, 1)
+        print(
+            f"Epoch {epoch:3d}/{num_epochs}  ε={epsilon:.3f}  "
+            f"loss={avg_loss:.6f}  先手 W/D/L={win}/{draw}/{loss}"
+        )
+
+    torch.save(model.state_dict(), model_path)
+    print(f"\n[RL] 強化学習完了: {model_path} に保存しました")
+    return model
+
+
 if __name__ == '__main__':
-    train(num_games=500, epochs=20, lr=0.001, batch_size=64)
+    import sys
+    mode = sys.argv[1] if len(sys.argv) > 1 else 'supervised'
+
+    if mode == 'rl':
+        # 強化学習のみ
+        reinforce_train(num_epochs=10, games_per_epoch=100)
+    elif mode == 'all':
+        # 教師あり → 強化学習の順で実行
+        train(num_games=500, epochs=20, lr=0.001, batch_size=64)
+        reinforce_train(num_epochs=10, games_per_epoch=100)
+    else:
+        # 教師あり学習のみ（デフォルト）
+        train(num_games=500, epochs=20, lr=0.001, batch_size=64)
