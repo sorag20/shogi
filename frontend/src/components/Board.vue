@@ -710,10 +710,13 @@ const getRowLabel = (rowIndex: number): string => {
   display: flex;
   flex-direction: column;
   gap: 20px;
-  padding: 20px;
-  background-color: white;
-  border-radius: 4px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  padding: 24px;
+  background: linear-gradient(145deg, #fdf8f0 0%, #f5ece0 100%);
+  border-radius: 8px;
+  box-shadow:
+    0 10px 40px rgba(0, 0, 0, 0.2),
+    0 2px 8px rgba(0, 0, 0, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.8);
 }
 
 .board-wrapper {
@@ -754,8 +757,15 @@ const getRowLabel = (rowIndex: number): string => {
   display: flex;
   flex-direction: column;
   gap: 1px;
-  background-color: #333;
-  padding: 1px;
+  background-color: #3d2008;
+  padding: 12px;
+  border-radius: 3px;
+  box-shadow:
+    0 12px 40px rgba(0, 0, 0, 0.5),
+    0 4px 12px rgba(0, 0, 0, 0.3),
+    inset 0 2px 4px rgba(255, 200, 100, 0.15),
+    inset 0 -2px 4px rgba(0, 0, 0, 0.3);
+  background-image: linear-gradient(135deg, #5c3210 0%, #3d2008 50%, #2a1404 100%);
 }
 
 .board-row {
@@ -782,19 +792,20 @@ const getRowLabel = (rowIndex: number): string => {
 .square {
   width: 50px;
   height: 50px;
-  background-color: #deb887;
-  border: 1px solid #333;
+  background: linear-gradient(150deg, #f0d898 0%, #deb87a 45%, #c89850 100%);
+  border: 1px solid #7a4e1a;
   display: flex;
   align-items: center;
   justify-content: center;
   position: relative;
   cursor: pointer;
   user-select: none;
-  transition: background-color 0.2s;
+  transition: background 0.15s;
+  box-shadow: inset 0 1px 0 rgba(255, 240, 180, 0.4), inset 0 -1px 0 rgba(0, 0, 0, 0.15);
 }
 
 .square:hover {
-  background-color: #e0c9a0;
+  background: linear-gradient(150deg, #f8e8b0 0%, #eacc8a 45%, #d4a860 100%);
 }
 
 .square.selected {
@@ -845,27 +856,31 @@ const getRowLabel = (rowIndex: number): string => {
   font-weight: bold;
   font-size: 16px;
   z-index: 2;
-  /* 五角形風の駒の形 */
-  clip-path: polygon(50% 0%, 100% 25%, 100% 100%, 0% 100%, 0% 25%);
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
-  transition: transform 0.1s;
-}
-
-.piece:hover {
-  transform: scale(1.05);
+  /* clip-path はここではなく ::after に適用 */
+  transition: transform 0.12s;
 }
 
 .piece.owner-black {
   background: linear-gradient(135deg, #8b7355 0%, #d4a373 50%, #8b7355 100%);
-  color: #000;
-  text-shadow: 0 0 1px rgba(255, 255, 255, 0.3);
+  color: #1a0a00;
+  clip-path: polygon(50% 0%, 100% 25%, 100% 100%, 0% 100%, 0% 25%);
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.4));
+}
+
+.piece.owner-black:hover {
+  transform: translateY(-2px) scale(1.06);
 }
 
 .piece.owner-white {
-  background: linear-gradient(135deg, #f5deb3 0%, #faf0e6 50%, #f5deb3 100%);
-  color: #000;
-  text-shadow: 0 0 1px rgba(255, 255, 255, 0.5);
+  background: linear-gradient(135deg, #8b7355 0%, #d4a373 50%, #8b7355 100%);
+  color: #1a0a00;
+  clip-path: polygon(50% 0%, 100% 25%, 100% 100%, 0% 100%, 0% 25%);
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.3));
   transform: rotate(180deg);
+}
+
+.piece.owner-white:hover {
+  transform: rotate(180deg) translateY(-2px) scale(1.06);
 }
 
 /* 白の駒は反転しているので、テキストも反転 */
@@ -883,20 +898,22 @@ const getRowLabel = (rowIndex: number): string => {
   top: 3px;
   left: 3px;
   font-size: 9px;
-  color: #d00;
+  color: #b00000;
   font-weight: bold;
-  text-shadow: 0 0 2px rgba(255, 255, 255, 0.8);
+  text-shadow: 0 1px 0 rgba(255, 200, 160, 0.5);
 }
 
 .piece-name {
   font-size: 18px;
   font-weight: 900;
   font-family: "Hiragino Mincho ProN", "Yu Mincho", "MS Mincho", serif;
+  color: #1a0a00;
+  text-shadow: 0 1px 0 rgba(255, 240, 160, 0.5);
 }
 
 .piece-name.promoted-piece {
-  color: #d32f2f;
-  text-shadow: 0 0 2px rgba(255, 255, 255, 0.8);
+  color: #c00000;
+  text-shadow: 0 1px 0 rgba(255, 200, 160, 0.5);
 }
 
 .board-controls {
@@ -1028,12 +1045,16 @@ const getRowLabel = (rowIndex: number): string => {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 12px;
-  background: #f5efe0;
-  border: 1px solid #c8a96e;
-  border-radius: 4px;
+  padding: 8px 14px;
+  background: linear-gradient(135deg, #f5ede0 0%, #e8d8c0 100%);
+  border: 1px solid #b08040;
+  border-radius: 6px;
   min-height: 52px;
   width: fit-content;
+  box-shadow:
+    0 3px 10px rgba(0, 0, 0, 0.15),
+    inset 0 1px 0 rgba(255, 240, 200, 0.6),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.1);
 }
 
 .hand-label {
@@ -1057,29 +1078,56 @@ const getRowLabel = (rowIndex: number): string => {
   width: 42px;
   height: 46px;
   cursor: pointer;
-  border: 2px solid transparent;
-  border-radius: 4px;
   clip-path: polygon(50% 0%, 100% 25%, 100% 100%, 0% 100%, 0% 25%);
-  box-shadow: 0 2px 4px rgba(0,0,0,0.2);
-  transition: transform 0.1s;
+  transition: transform 0.12s, filter 0.12s;
   position: relative;
 }
 
-.hand-piece:hover {
-  transform: scale(1.08);
+.hand-piece.selected.owner-black {
+  filter:
+    drop-shadow(0 4px 0 #1a9940)
+    drop-shadow(0 6px 0 #0f6628)
+    drop-shadow(0 8px 8px rgba(0, 0, 0, 0.4));
 }
 
-.hand-piece.selected {
-  outline: 3px solid #2ecc71;
-  outline-offset: 2px;
+.hand-piece.selected.owner-white {
+  filter:
+    drop-shadow(0 -4px 0 #1a9940)
+    drop-shadow(0 -6px 0 #0f6628)
+    drop-shadow(0 4px 8px rgba(0, 0, 0, 0.4));
 }
 
 .hand-piece.owner-black {
-  background: linear-gradient(135deg, #8b7355 0%, #d4a373 50%, #8b7355 100%);
+  background: #d4a84a;
+  filter:
+    drop-shadow(0 4px 0 #8a5010)
+    drop-shadow(0 6px 0 #4a2808)
+    drop-shadow(0 8px 6px rgba(0, 0, 0, 0.45));
 }
 
+.hand-piece.owner-black:hover {
+  transform: translateY(-2px) scale(1.08);
+  filter:
+    drop-shadow(0 5px 0 #8a5010)
+    drop-shadow(0 8px 0 #4a2808)
+    drop-shadow(0 10px 8px rgba(0, 0, 0, 0.5));
+}
+
+/* 後手持ち駒は盤外（上側エリア）に表示、先手と同じ向きで置く */
 .hand-piece.owner-white {
-  background: linear-gradient(135deg, #f5deb3 0%, #faf0e6 50%, #f5deb3 100%);
+  background: #d4a84a;
+  filter:
+    drop-shadow(0 -4px 0 #8a5010)
+    drop-shadow(0 -6px 0 #4a2808)
+    drop-shadow(0 4px 6px rgba(0, 0, 0, 0.45));
+}
+
+.hand-piece.owner-white:hover {
+  transform: translateY(2px) scale(1.08);
+  filter:
+    drop-shadow(0 -5px 0 #8a5010)
+    drop-shadow(0 -8px 0 #4a2808)
+    drop-shadow(0 6px 8px rgba(0, 0, 0, 0.5));
 }
 
 .hand-piece-name {
@@ -1087,12 +1135,15 @@ const getRowLabel = (rowIndex: number): string => {
   font-weight: 900;
   font-family: "Hiragino Mincho ProN", "Yu Mincho", "MS Mincho", serif;
   line-height: 1;
+  color: #1a0a00;
+  text-shadow: 0 1px 0 rgba(255, 240, 160, 0.5);
 }
 
 .hand-piece-count {
   font-size: 11px;
   font-weight: bold;
-  color: #333;
+  color: #3a1a00;
+  text-shadow: 0 1px 0 rgba(255, 240, 160, 0.4);
   line-height: 1;
 }
 </style>

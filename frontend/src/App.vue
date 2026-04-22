@@ -1,7 +1,15 @@
 <template>
   <div id="app" class="app-container">
+    <!-- ランディングページ -->
+    <LandingPage v-if="showLanding" @start="showLanding = false" />
+
+    <template v-else>
     <header class="app-header">
       <div class="header-content">
+        <button @click="showLanding = true" class="logo-btn">
+          <span class="logo-piece">将</span>
+          <span class="logo-text">SHOGI ANALYZER</span>
+        </button>
         <nav class="app-nav">
           <button
             :class="{ active: currentMode === 'free' }"
@@ -125,16 +133,18 @@
       </div>
     </main>
 
+    </template><!-- v-else: メインアプリ -->
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, watch, onMounted } from 'vue'
-import { LoadingSpinner, ErrorMessage, Board, ReplayControls, KifUploader, MoveHistory, LoginForm, EvaluationDisplay } from './components'
+import { LoadingSpinner, ErrorMessage, Board, ReplayControls, KifUploader, MoveHistory, LoginForm, EvaluationDisplay, LandingPage } from './components'
 import type { BoardState } from './types/shogi'
 
 const STORAGE_KEY = 'shogi-app-state'
 
+const showLanding = ref(true)
 const currentMode = ref<'free' | 'replay'>('free')
 const isLoading = ref(false)
 const error = ref<string | null>(null)
@@ -346,10 +356,49 @@ const resetReplay = () => {
 }
 
 .app-header {
-  background-color: #2c3e50;
+  background-color: #1a1a2e;
   color: white;
-  padding: 12px 20px;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  padding: 10px 20px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.logo-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+  transition: background 0.2s;
+  flex-shrink: 0;
+}
+
+.logo-btn:hover {
+  background: rgba(226, 185, 110, 0.1);
+}
+
+.logo-piece {
+  width: 30px;
+  height: 30px;
+  background: linear-gradient(135deg, #e2b96e, #c8953a);
+  clip-path: polygon(50% 0%, 100% 20%, 100% 100%, 0% 100%, 0% 20%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 900;
+  font-family: "Hiragino Mincho ProN", serif;
+  color: #1a1a2e;
+}
+
+.logo-text {
+  font-size: 12px;
+  font-weight: 600;
+  color: #e2b96e;
+  letter-spacing: 2px;
+  white-space: nowrap;
 }
 
 .header-content {
