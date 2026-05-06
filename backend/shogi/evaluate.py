@@ -4,23 +4,30 @@ import numpy as np
 import os
 
 BOARD = 9
-
+# P:歩, L:香, N:桂, S:銀, G:金, B:角, R:飛, K:玉
 P,L,N,S,G,B,R,K = 1,2,3,4,5,6,7,8
 
 PROMOTE = {
 P:9,L:10,N:11,S:12,B:13,R:14
 }
 
+# 持ち駒エンコード用定数
+HAND_TYPES = [P, L, N, S, G, B, R]  # [1,2,3,4,5,6,7]
+MAX_HAND   = {P: 18, L: 4, N: 4, S: 4, G: 4, B: 2, R: 2}
+
+# 入力: 盤面 81 + 先手持ち駒 7 + 後手持ち駒 7 = 95
+_INPUT_SIZE = 95
+
 class Net(nn.Module):
 
     def __init__(self):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(81,128),
+            nn.Linear(_INPUT_SIZE, 128),
             nn.ReLU(),
-            nn.Linear(128,64),
+            nn.Linear(128, 64),
             nn.ReLU(),
-            nn.Linear(64,1),
+            nn.Linear(64, 1),
         )
 
     def forward(self,x):
@@ -32,20 +39,33 @@ model.eval()
 # 学習済み重みがあれば読み込む
 _model_path = os.path.join(os.path.dirname(__file__), 'model.pth')
 if os.path.exists(_model_path):
-    model.load_state_dict(torch.load(_model_path, map_location='cpu'))
-    print(f"[evaluate] Loaded trained model from {_model_path}")
+    try:
+        model.load_state_dict(torch.load(_model_path, map_location='cpu'))
+        print(f"[evaluate] Loaded trained model from {_model_path}")
+    except Exception as e:
+        print(f"[evaluate] Weight load failed ({e}), using random weights")
 else:
     print("[evaluate] No trained model found, using random weights")
 
-def tensor(board):
-    t = torch.tensor(board.flatten(), dtype=torch.float32)
-    return t.unsqueeze(0)  # add batch dim: (81,) -> (1, 81)
+def tensor(board, sente_hand=None, gote_hand=None):
+    """盤面 + 持ち駒を結合して (1, 95) テンソルに変換"""
+    board_vec = board.flatten().astype(np.float32)
+    s_vec = np.array(
+        [(sente_hand.get(p, 0) if sente_hand else 0) / MAX_HAND[p] for p in HAND_TYPES],
+        dtype=np.float32,
+    )
+    g_vec = np.array(
+        [(gote_hand.get(p, 0) if gote_hand else 0) / MAX_HAND[p] for p in HAND_TYPES],
+        dtype=np.float32,
+    )
+    t = torch.tensor(np.concatenate([board_vec, s_vec, g_vec]))
+    return t.unsqueeze(0)
 
 LABEL_SCALE = 10000.0  # train.py と同じスケール
 
-def evaluate(board):
+def evaluate(board, sente_hand=None, gote_hand=None):
     with torch.no_grad():
-        return model(tensor(board)).item() * LABEL_SCALE
+        return model(tensor(board, sente_hand, gote_hand)).item() * LABEL_SCALE
 
 initial = np.array([
 [-2,-3,-4,-5,-8,-5,-4,-3,-2],
@@ -194,6 +214,7 @@ def generate_moves(board, player):
     for y in range(9):
         for x in range(9):
             piece = board[y][x]
+            # 自分の駒かどうかの確認
             if piece * player <= 0:
                 continue
             p = abs(piece)

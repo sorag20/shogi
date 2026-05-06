@@ -13,7 +13,9 @@ class KifParser:
     
     # Regex patterns for KIF format
     METADATA_PATTERN = r'^([^：]+)：(.+)$'
-    MOVE_PATTERN = r'^\s*(\d+)\s+(.+?)(?:\((\d+)\))?(?:\s*(.*))?$'
+    # 手番行: "  1 7六歩(77)" や "  3 7一角打"
+    # 棋譜表記全体を貪欲に取得し、末尾の時刻・コメントは別グループ
+    MOVE_PATTERN = r'^\s*(\d+)\s+(\S+(?:\([^)]+\))?(?:成|打)?)\s*(.*)$'
     
     # Piece name mappings (Japanese to English)
     PIECE_NAMES_JP = {
@@ -156,14 +158,14 @@ class KifParser:
             # Parse move line
             match = re.match(KifParser.MOVE_PATTERN, line)
             if match:
-                move_num_str, notation, time_str, comment = match.groups()
-                
+                move_num_str, notation, comment = match.groups()
+
                 try:
                     move_num = int(move_num_str)
-                    
+
                     # Parse notation
                     move_data = KifParser._parse_notation(notation, move_num)
-                    
+
                     if move_data:
                         move_data['comment'] = comment.strip() if comment else None
                         moves.append(move_data)
@@ -186,32 +188,38 @@ class KifParser:
         if notation in ['投了', '中断', '中止']:
             return None
         
-        # Extract destination square and piece type
-        # Format: [destination][piece_name]
-        match = re.match(r'^(\d)(\d)(.+?)(?:\((\d)(\d)\))?$', notation)
-        
+        # KIF形式: 列は算用数字(1-9)、段は漢数字(一-九)
+        # 例: 7六歩(77)  6八玉(59)  7一角打
+        _KANJI_ROW = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5,
+                      '六': 6, '七': 7, '八': 8, '九': 9}
+
+        match = re.match(
+            r'^(\d)([一二三四五六七八九])(.+?)(?:\((\d)(\d)\))?$',
+            notation
+        )
+
         if not match:
             return None
-        
-        to_col_str, to_row_str, piece_notation, from_col_str, from_row_str = match.groups()
-        
-        to_col = int(to_col_str) - 1  # Convert to 0-indexed
-        to_row = int(to_row_str) - 1
-        
+
+        to_col_str, to_row_kanji, piece_notation, from_col_str, from_row_str = match.groups()
+
+        to_col = int(to_col_str) - 1
+        to_row = _KANJI_ROW[to_row_kanji] - 1
+
         # Parse piece type and promotion
         piece_type, promoted = KifParser._parse_piece_notation(piece_notation)
-        
+
         if not piece_type:
             return None
-        
+
         from_col = int(from_col_str) - 1 if from_col_str else None
         from_row = int(from_row_str) - 1 if from_row_str else None
-        
+
         return {
             'move_number': move_number,
             'notation': notation,
             'from_square': f'{from_col_str}{from_row_str}' if from_col_str else None,
-            'to_square': f'{to_col_str}{to_row_str}',
+            'to_square': f'{to_col_str}{to_row_kanji}',
             'piece_type': piece_type,
             'is_promotion': promoted,
             'is_drop': from_col is None and from_row is None,

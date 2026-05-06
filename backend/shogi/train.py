@@ -11,7 +11,8 @@ import torch.nn as nn
 import numpy as np
 import random
 import os
-from evaluate import Net, tensor, initial, generate_moves, play, inside
+from evaluate import Net, tensor, initial, generate_moves, play, inside, HAND_TYPES, MAX_HAND
+from az_state import initial_state
 
 # 駒の点数（一般的な将棋ソフトの点数スケール）
 PIECE_VALUES = {
@@ -32,7 +33,7 @@ PIECE_VALUES = {
 }
 
 
-def piece_value_score(board):
+def piece_value_score(board, sente_hand=None, gote_hand=None):
     """駒得評価関数: 先手有利 → 正, 後手有利 → 負 (点数そのまま)"""
     score = 0.0
     for y in range(9):
@@ -43,37 +44,56 @@ def piece_value_score(board):
             p = abs(int(val))
             v = PIECE_VALUES.get(p, 0.0)
             score += v if val > 0 else -v
+    # 持ち駒の価値も加算
+    if sente_hand:
+        for pt, cnt in sente_hand.items():
+            score += PIECE_VALUES.get(pt, 0.0) * cnt
+    if gote_hand:
+        for pt, cnt in gote_hand.items():
+            score -= PIECE_VALUES.get(pt, 0.0) * cnt
     return score
 
 
-def random_game(max_moves=60):
-    """ランダムに手を進め、途中の局面リストを返す"""
-    board = initial.copy()
-    player = 1
+def az_random_game(max_moves=150):
+    """AZState でランダム自己対局し、途中の局面（持ち駒付き）を返す"""
+    state = initial_state()
     positions = []
-
     for _ in range(max_moves):
-        moves = generate_moves(board, player)
-        if not moves:
+        legal = state.legal_moves()
+        if not legal:
             break
-        move = random.choice(moves)
-        board = play(board, move)
-        positions.append((board.copy(), player))
-        player = -player
-
+        move = random.choice(legal)
+        positions.append(state)
+        state = state.play(move)
     return positions
 
 
 LABEL_SCALE = 10000.0  # 学習時の正規化スケール（推論時に掛け戻す）
 
 
+def _state_to_feature(state):
+    """AZState → (feature_95,) の numpy 配列を返す"""
+    sente_hand = state.hands[1]
+    gote_hand  = state.hands[-1]
+    board_vec  = state.board.flatten().astype(np.float32)
+    s_vec = np.array(
+        [sente_hand.get(p, 0) / MAX_HAND[p] for p in HAND_TYPES], dtype=np.float32
+    )
+    g_vec = np.array(
+        [gote_hand.get(p, 0) / MAX_HAND[p] for p in HAND_TYPES], dtype=np.float32
+    )
+    return np.concatenate([board_vec, s_vec, g_vec])
+
+
 def generate_dataset(num_games=500):
-    """学習データ生成"""
+    """学習データ生成（持ち駒付き局面）"""
     X, y = [], []
     for _ in range(num_games):
-        for board, _ in random_game():
-            label = piece_value_score(board) / LABEL_SCALE  # [-1, 1]付近に正規化
-            X.append(board.flatten().astype(np.float32))
+        for state in az_random_game():
+            label = piece_value_score(
+                state.board, state.hands[1], state.hands[-1]
+            ) / LABEL_SCALE
+            X.append(_state_to_feature(state))
             y.append([label])
 
     X = np.array(X, dtype=np.float32)
@@ -129,50 +149,43 @@ def train(num_games=500, epochs=20, lr=0.001, batch_size=64):
 
 def self_play_game(model_fn, max_moves=150, gamma=0.95, epsilon=0.1):
     """
-    自己対局を1局行い (局面, TDターゲット) のリストを返す。
+    AZState を使って自己対局を1局行い (局面, TDターゲット) のリストを返す。
 
-    model_fn(board) : numpy配列の局面を受け取り、先手視点の評価値(float)を返す関数
+    model_fn(board, sente_hand, gote_hand) : 先手視点の評価値(float)を返す関数
     gamma           : 割引率（終盤の手ほど報酬が大きく反映される）
     epsilon         : ε-greedy の探索率（ランダム手の確率）
     """
-    from evaluate import legal_moves, play, initial
-
-    board = initial.copy()
-    player = 1
-    history = []   # (board_array, player) を記録
-    result = 0     # 先手視点の最終結果: +1=先手勝, -1=後手勝, 0=引き分け
+    state  = initial_state()
+    history = []
+    result  = 0  # 先手視点の最終結果: +1=先手勝, -1=後手勝, 0=引き分け
 
     for _ in range(max_moves):
-        moves = legal_moves(board, player)
-        if not moves:
-            # 合法手なし = 現プレイヤーの負け
-            result = -player   # 先手視点: 先手が詰まれたら -1
+        legal = state.legal_moves()
+        if not legal:
+            result = -state.player  # 合法手なし = 現プレイヤーの負け（先手視点）
             break
 
-        # ε-greedy: 確率 ε でランダム手、それ以外はモデルの最善手
+        # ε-greedy
         if random.random() < epsilon:
-            move = random.choice(moves)
+            move = random.choice(legal)
         else:
             best_m, best_v = None, -float('inf')
-            for m in moves:
-                nb = play(board, m)
-                v = model_fn(nb) * player   # 現プレイヤー視点に変換
+            for m in legal:
+                ns = state.play(m)
+                v = model_fn(ns.board, ns.hands[1], ns.hands[-1]) * state.player
                 if v > best_v:
                     best_v, best_m = v, m
             move = best_m
 
-        history.append(board.copy())
-        board = play(board, move)
-        player = -player
-    # max_moves に達した場合は result=0（引き分け）のまま
+        history.append(state)
+        state = state.play(move)
 
-    # TD ターゲット: 終局から遡るにつれ割引
     T = len(history)
     samples = []
-    for t, state in enumerate(history):
+    for t, st in enumerate(history):
         discount = gamma ** (T - t - 1)
-        target = result * discount            # 先手視点の割引済み報酬 ∈ [-1, 1]
-        samples.append((state, float(target)))
+        target = result * discount
+        samples.append((st, float(target)))
 
     return samples, result
 
@@ -213,9 +226,9 @@ def reinforce_train(
     criterion = nn.MSELoss()
 
     # モデルの推論関数（自己対局内で使用）
-    def model_fn(board_arr):
+    def model_fn(board_arr, sente_hand=None, gote_hand=None):
         with torch.no_grad():
-            return model(tensor(board_arr)).item() * LABEL_SCALE
+            return model(tensor(board_arr, sente_hand, gote_hand)).item() * LABEL_SCALE
 
     print(f"=== 強化学習開始 (epochs={num_epochs}, games/epoch={games_per_epoch}) ===")
 
@@ -228,8 +241,8 @@ def reinforce_train(
 
         for _ in range(games_per_epoch):
             samples, result = self_play_game(model_fn, gamma=gamma, epsilon=epsilon)
-            for state, target in samples:
-                all_states.append(state.flatten().astype(np.float32))
+            for st, target in samples:
+                all_states.append(_state_to_feature(st))
                 all_targets.append([target])   # ターゲットは [-1, 1] スケール
             if result > 0:
                 win += 1

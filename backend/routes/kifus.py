@@ -77,13 +77,25 @@ def upload_kifu():
 
         # Create Kifu model
         metadata = parsed['metadata']
+
+        # game_date: KIFの日時文字列 → date型に変換
+        raw_date = metadata.get('game_date')
+        game_date = None
+        if raw_date:
+            for fmt in ('%Y/%m/%d %H:%M:%S', '%Y/%m/%d', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d'):
+                try:
+                    game_date = datetime.strptime(raw_date, fmt).date()
+                    break
+                except ValueError:
+                    continue
+
         kifu = KifuModel(
             user_id=user_id,
             file_path=file_path,
             original_filename=original_filename,
             black_player=metadata.get('black_player'),
             white_player=metadata.get('white_player'),
-            game_date=metadata.get('game_date'),
+            game_date=game_date,
             result=metadata.get('result')
         )
 

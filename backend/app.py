@@ -64,6 +64,7 @@ def create_app(config_name=None):
             try:
                 db.create_all()
                 app.logger.info('Database tables created successfully')
+                _run_migrations(app)
                 break
             except Exception as e:
                 if attempt < max_retries - 1:
@@ -159,6 +160,40 @@ def register_health_check(app):
             'database': db_status,
             'timestamp': datetime.utcnow().isoformat()
         }), 200 if db_status == 'healthy' else 503
+
+def _run_migrations(app):
+    """既存テーブルに不足カラムを追加するマイグレーション"""
+    migrations = [
+        (
+            "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS "
+            "WHERE TABLE_SCHEMA = DATABASE() "
+            "AND TABLE_NAME = 'kifus' AND COLUMN_NAME = 'user_id'",
+            "ALTER TABLE kifus ADD COLUMN user_id VARCHAR(36) NULL"
+        ),
+        (
+            "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS "
+            "WHERE TABLE_SCHEMA = DATABASE() "
+            "AND TABLE_NAME = 'kifus' AND COLUMN_NAME = 'file_path'",
+            "ALTER TABLE kifus ADD COLUMN file_path VARCHAR(512) NULL"
+        ),
+        (
+            "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS "
+            "WHERE TABLE_SCHEMA = DATABASE() "
+            "AND TABLE_NAME = 'kifus' AND COLUMN_NAME = 'original_filename'",
+            "ALTER TABLE kifus ADD COLUMN original_filename VARCHAR(255) NULL"
+        ),
+    ]
+    try:
+        for check_sql, alter_sql in migrations:
+            exists = db.session.execute(text(check_sql)).scalar()
+            if not exists:
+                db.session.execute(text(alter_sql))
+                app.logger.info(f'Migration applied: {alter_sql}')
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        app.logger.warning(f'Migration warning (non-fatal): {e}')
+
 
 def register_blueprints(app):
     """Register API blueprints"""

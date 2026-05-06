@@ -165,10 +165,16 @@ const boardState = ref<BoardState>(props.initialBoard || createInitialBoard())
 // initialBoard が変更されたら盤面を更新（リロード時の復元用）
 watch(() => props.initialBoard, (newBoard) => {
   if (newBoard) {
-    boardState.value = newBoard
-    console.log('Board restored from saved state')
+    boardState.value = {
+      board: newBoard.board.map(row => row.map(p => p ? { ...p } : null)),
+      hands: {
+        black: { ...newBoard.hands.black },
+        white: { ...newBoard.hands.white },
+      },
+      turn: newBoard.turn,
+    }
   }
-}, { immediate: true, deep: true })
+}, { immediate: true })
 
 const selectedRow = ref<number | null>(null)
 const selectedCol = ref<number | null>(null)
@@ -420,20 +426,14 @@ const movePiece = (fromRow: number, fromCol: number, toRow: number, toCol: numbe
   const isCapture = capturedPiece !== null
 
   // 成ったかどうか
-  let didPromote = false
-
-  // 成る場合
-  if (shouldPromote) {
-    piece.promoted = true
-    didPromote = true
-  }
+  const didPromote = shouldPromote
 
   // 棋譜表記を生成
   const notation = moveToNotation(piece, fromRow, fromCol, toRow, toCol, isCapture, didPromote)
 
-  // 駒を移動
-  boardState.value.board[toRow][toCol] = piece
+  // 駒を移動（元の位置を削除してから新しい位置に配置）
   boardState.value.board[fromRow][fromCol] = null
+  boardState.value.board[toRow][toCol] = { ...piece, promoted: didPromote ? true : piece.promoted }
 
   // 取った駒を持ち駒に追加（成り駒は元の種類に戻す）
   if (capturedPiece) {

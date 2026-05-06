@@ -25,6 +25,13 @@
           >
             棋譜再生モード
           </button>
+          <button
+            :class="{ active: currentMode === 'vs-ai' }"
+            @click="switchMode('vs-ai')"
+            class="nav-btn"
+          >
+            AI対戦
+          </button>
         </nav>
         <div class="auth-section">
           <template v-if="currentUser">
@@ -91,6 +98,11 @@
           </div>
         </div>
 
+        <!-- AI対戦モード -->
+        <div v-else-if="currentMode === 'vs-ai'" class="mode-content">
+          <VsAiMode />
+        </div>
+
         <!-- 棋譜再生モード -->
         <div v-else-if="currentMode === 'replay'" class="mode-content">
           <div class="header-section">
@@ -139,13 +151,87 @@
 
 <script setup lang="ts">
 import { ref, watch, onMounted } from 'vue'
-import { LoadingSpinner, ErrorMessage, Board, ReplayControls, KifUploader, MoveHistory, LoginForm, EvaluationDisplay, LandingPage } from './components'
-import type { BoardState } from './types/shogi'
+import { LoadingSpinner, ErrorMessage, Board, ReplayControls, KifUploader, MoveHistory, LoginForm, EvaluationDisplay, LandingPage, VsAiMode } from './components'
+import type { BoardState, PieceType, Owner } from './types/shogi'
+import { createInitialBoard } from './utils/boardSetup'
+
+// ── KIF棋譜再生用: 盤面ステップ計算 ─────────────────────────────
+
+const KANJI_TO_ROW: Record<string, number> = {
+  '一': 0, '二': 1, '三': 2, '四': 3, '五': 4, '六': 5, '七': 6, '八': 7, '九': 8,
+}
+
+/** KIFの移動先 "7六" → { row, col } (0-indexed) */
+function parseToSquare(s: string): { row: number; col: number } {
+  const kifCol = parseInt(s[0])
+  const kifRow = KANJI_TO_ROW[s[1]] ?? (parseInt(s[1]) - 1)
+  return { row: kifRow, col: 9 - kifCol }
+}
+
+/** KIFの移動元 "77" → { row, col } (0-indexed) */
+function parseFromSquare(s: string): { row: number; col: number } {
+  const kifCol = parseInt(s[0])
+  const kifRow = parseInt(s[1])
+  return { row: kifRow - 1, col: 9 - kifCol }
+}
+
+function cloneBoard(state: BoardState): BoardState {
+  return {
+    board: state.board.map(row => row.map(p => p ? { ...p } : null)),
+    hands: {
+      black: { ...state.hands.black },
+      white: { ...state.hands.white },
+    },
+    turn: state.turn,
+  }
+}
+
+/** 1手適用して新しい BoardState を返す */
+function applyKifMove(state: BoardState, move: any): BoardState {
+  const next = cloneBoard(state)
+  const owner: Owner = state.turn
+  const opponent: Owner = owner === 'black' ? 'white' : 'black'
+  const pieceType = move.piece_type as PieceType
+
+  if (move.is_drop) {
+    const { row, col } = parseToSquare(move.to_square)
+    next.board[row][col] = { type: pieceType, owner, promoted: false }
+    if (next.hands[owner][pieceType] > 0) next.hands[owner][pieceType]--
+  } else {
+    const from = parseFromSquare(move.from_square)
+    const to   = parseToSquare(move.to_square)
+
+    // 取った駒を持ち駒に追加（promoted → 元の駒種に戻る = promoted:false）
+    const captured = next.board[to.row][to.col]
+    if (captured) {
+      next.hands[owner][captured.type]++
+    }
+
+    next.board[to.row][to.col] = {
+      type: pieceType,
+      owner,
+      promoted: move.is_promotion,
+    }
+    next.board[from.row][from.col] = null
+  }
+
+  next.turn = opponent
+  return next
+}
+
+/** KIFの全手順から各手数の盤面スナップショットを生成 */
+function buildBoardHistory(moves: any[]): BoardState[] {
+  const history: BoardState[] = [createInitialBoard()]
+  for (const move of moves) {
+    history.push(applyKifMove(history[history.length - 1], move))
+  }
+  return history
+}
 
 const STORAGE_KEY = 'shogi-app-state'
 
 const showLanding = ref(true)
-const currentMode = ref<'free' | 'replay'>('free')
+const currentMode = ref<'free' | 'replay' | 'vs-ai'>('free')
 const isLoading = ref(false)
 const error = ref<string | null>(null)
 const showLoginForm = ref(false)
@@ -279,8 +365,9 @@ const currentNotation = ref('')
 const currentComment = ref('')
 const currentBoardState = ref<BoardState | undefined>(undefined)
 const replayModeHistory = ref<Array<{ notation: string; time?: string; comment?: string }>>([])
+const boardHistory = ref<BoardState[]>([])
 
-const switchMode = (mode: 'free' | 'replay') => {
+const switchMode = (mode: 'free' | 'replay' | 'vs-ai') => {
   currentMode.value = mode
   error.value = null
 }
@@ -290,49 +377,46 @@ const onFileUploaded = (data: any) => {
   totalMoves.value = data.moves?.length || 0
   currentMove.value = 0
 
-  // 棋譜データから履歴を作成
   if (data.moves && Array.isArray(data.moves)) {
     replayModeHistory.value = data.moves.map((move: any) => ({
       notation: move.notation || move.move || '---',
       time: move.time,
       comment: move.comment,
     }))
+    // 全手数分の盤面スナップショットを事前計算
+    boardHistory.value = buildBoardHistory(data.moves)
   }
 
-  console.log('KIF file uploaded:', data)
+  currentBoardState.value = boardHistory.value[0]
 }
 
-const nextMove = () => {
-  if (currentMove.value < totalMoves.value) {
-    currentMove.value++
-    updateCurrentNotation()
-    // TODO: 実際の棋譜データから盤面を更新
-  }
-}
-
-const previousMove = () => {
-  if (currentMove.value > 0) {
-    currentMove.value--
-    updateCurrentNotation()
-    // TODO: 実際の棋譜データから盤面を更新
-  }
-}
-
-const jumpToMove = (moveNumber: number) => {
-  currentMove.value = moveNumber
-  updateCurrentNotation()
-  // TODO: 実際の棋譜データから盤面を更新
-}
-
-const updateCurrentNotation = () => {
-  if (currentMove.value > 0 && replayModeHistory.value[currentMove.value - 1]) {
-    const move = replayModeHistory.value[currentMove.value - 1]
+const goToMoveIndex = (index: number) => {
+  currentMove.value = index
+  currentBoardState.value = boardHistory.value[index]
+  if (index > 0 && replayModeHistory.value[index - 1]) {
+    const move = replayModeHistory.value[index - 1]
     currentNotation.value = move.notation
     currentComment.value = move.comment || ''
   } else {
     currentNotation.value = ''
     currentComment.value = ''
   }
+}
+
+const nextMove = () => {
+  if (currentMove.value < totalMoves.value) {
+    goToMoveIndex(currentMove.value + 1)
+  }
+}
+
+const previousMove = () => {
+  if (currentMove.value > 0) {
+    goToMoveIndex(currentMove.value - 1)
+  }
+}
+
+const jumpToMove = (moveNumber: number) => {
+  goToMoveIndex(Math.max(0, Math.min(moveNumber, totalMoves.value)))
 }
 
 const resetReplay = () => {
@@ -343,6 +427,7 @@ const resetReplay = () => {
   currentComment.value = ''
   currentBoardState.value = undefined
   replayModeHistory.value = []
+  boardHistory.value = []
 }
 </script>
 

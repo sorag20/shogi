@@ -2,9 +2,21 @@
   <div class="evaluation-display">
     <div class="evaluation-header">
       <h3>評価値</h3>
-      <button @click="requestEvaluation" class="btn btn-sm" :disabled="isLoading">
-        {{ isLoading ? '計算中...' : '更新' }}
-      </button>
+      <div class="header-controls">
+        <div class="model-toggle">
+          <button
+            @click="modelType = 'nn'"
+            :class="['toggle-btn', { active: modelType === 'nn' }]"
+          >NN</button>
+          <button
+            @click="modelType = 'az'"
+            :class="['toggle-btn', { active: modelType === 'az' }]"
+          >AZ</button>
+        </div>
+        <button @click="requestEvaluation" class="btn btn-sm" :disabled="isLoading">
+          {{ isLoading ? '計算中...' : '更新' }}
+        </button>
+      </div>
     </div>
 
     <LoadingSpinner v-if="isLoading" :is-loading="true" message="評価値を計算中..." />
@@ -53,6 +65,7 @@ const evaluation = ref<number | null>(null)
 const bestMove = ref<string | null | undefined>(undefined) // undefined=未取得, null=なし, string=手
 const isLoading = ref(false)
 const error = ref<string | null>(null)
+const modelType = ref<'nn' | 'az'>('nn')
 
 const evaluationClass = computed(() => {
   if (evaluation.value === null) return ''
@@ -91,7 +104,7 @@ const requestEvaluation = async () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ board: props.board }),
+        body: JSON.stringify({ board: props.board, model: modelType.value }),
       }),
       fetch('http://localhost:5001/api/best-move', {
         method: 'POST',
@@ -134,6 +147,37 @@ const requestEvaluation = async () => {
   margin: 0;
   font-size: 15px;
   color: #2c3e50;
+}
+
+.header-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.model-toggle {
+  display: flex;
+  border: 1px solid #bdc3c7;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.toggle-btn {
+  padding: 3px 8px;
+  font-size: 11px;
+  border: none;
+  background: #f5f5f5;
+  color: #666;
+  cursor: pointer;
+}
+
+.toggle-btn.active {
+  background: #3498db;
+  color: white;
+}
+
+.toggle-btn:hover:not(.active) {
+  background: #e0e0e0;
 }
 
 .bar-wrapper {
