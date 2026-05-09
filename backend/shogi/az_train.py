@@ -42,9 +42,9 @@ Sample = Tuple[np.ndarray, np.ndarray, float]
 # --------------------------------------------------------------------------
 DEFAULT_CFG: dict = dict(
     # ── 自己対局 ──────────────────────────────
-    num_iterations   = 3,   # 学習イテレーション数 100
-    games_per_iter   = 20,    # 1イテレーションあたりの自己対局数
-    num_simulations  = 200,   # 1手あたりの MCTS シミュレーション数
+    num_iterations   = 25,   # 学習イテレーション数 100
+    games_per_iter   = 50,    # 1イテレーションあたりの自己対局数
+    num_simulations  = 20,   # 1手あたりの MCTS シミュレーション数
     max_moves        = 300,   # 1局の最大手数（超えたら引き分け）
     temp_threshold   = 30,    # この手数以降は temperature=0 (確定的選択)
     # ── 学習 ──────────────────────────────────
@@ -55,7 +55,7 @@ DEFAULT_CFG: dict = dict(
     buffer_size      = 100_000,  # リプレイバッファ最大サイズ
     # ── チェックポイント ─────────────────────
     checkpoint_every = 10,   # N イテレーションごとに保存
-    device           = 'cpu',
+    device           = 'mps',
 )
 
 

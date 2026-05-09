@@ -37,7 +37,11 @@ MAX_HAND = {P: 18, L: 4, N: 4, S: 4, G: 4, B: 2, R: 2}
 # ch 28-34 : 先手の持ち駒 [P,L,N,S,G,B,R] / MAX_HAND（スカラーを面で表現）
 # ch 35-41 : 後手の持ち駒 [P,L,N,S,G,B,R] / MAX_HAND
 # ch 42    : 手番（先手なら全1、後手なら全0）
-INPUT_CHANNELS = 43
+# ch 43    : 同一局面が過去に1回以上出現（千日手検出用）
+# ch 44    : 同一局面が過去に2回以上出現（千日手検出用）
+# ch 45    : 総手数 / MAX_MOVES（ゲームフェーズ認識用）
+INPUT_CHANNELS = 46
+MAX_MOVES = 500
 
 # --------------------------------------------------------------------------
 # アクション空間のエンコーディング
@@ -161,9 +165,9 @@ class AZState:
     player : 1(先手) or -1(後手)  ← 手番
     """
 
-    __slots__ = ('board', 'hands', 'player')
+    __slots__ = ('board', 'hands', 'player', 'history', 'move_count')
 
-    def __init__(self, board=None, hands=None, player: int = 1):
+    def __init__(self, board=None, hands=None, player: int = 1, history=None, move_count: int = 0):
         if board is None:
             self.board = initial.copy().astype(np.int8)
         else:
@@ -178,6 +182,19 @@ class AZState:
             self.hands = {1: dict(hands[1]), -1: dict(hands[-1])}
 
         self.player = player
+        self.history: list = list(history) if history is not None else []
+        self.move_count: int = move_count
+
+    # ------------------------------------------------------------------
+    # 局面ハッシュ（千日手検出用）
+    # ------------------------------------------------------------------
+    def _hash(self) -> tuple:
+        """盤面・持ち駒・手番をまとめたハッシュキーを返す。"""
+        hands_key = (
+            tuple(self.hands[1][p]  for p in HAND_TYPES),
+            tuple(self.hands[-1][p] for p in HAND_TYPES),
+        )
+        return (self.board.tobytes(), hands_key, self.player)
 
     # ------------------------------------------------------------------
     # 手生成（内部）
@@ -225,14 +242,16 @@ class AZState:
             if base != K:
                 nh[self.player][base] += 1
 
-        return AZState(nb, nh, -self.player)
+        new_history = self.history + [self._hash()]
+        return AZState(nb, nh, -self.player, new_history, self.move_count + 1)
 
     def _apply_drop_move(self, piece_type: int, ty: int, tx: int) -> 'AZState':
         nb = self.board.copy()
         nh = {1: dict(self.hands[1]), -1: dict(self.hands[-1])}
         nb[ty][tx] = self.player * piece_type
         nh[self.player][piece_type] -= 1
-        return AZState(nb, nh, -self.player)
+        new_history = self.history + [self._hash()]
+        return AZState(nb, nh, -self.player, new_history, self.move_count + 1)
 
     # ------------------------------------------------------------------
     # 公開 API
@@ -305,7 +324,7 @@ class AZState:
 
         Returns
         -------
-        ndarray shape (43, 9, 9) float32
+        ndarray shape (46, 9, 9) float32
         """
         planes = np.zeros((INPUT_CHANNELS, 9, 9), dtype=np.float32)
 
@@ -330,6 +349,16 @@ class AZState:
         # 手番プレーン
         if self.player == 1:
             planes[42] = 1.0
+
+        # 繰り返しプレーン（千日手検出）
+        repeat_count = self.history.count(self._hash())
+        if repeat_count >= 1:
+            planes[43] = 1.0
+        if repeat_count >= 2:
+            planes[44] = 1.0
+
+        # 総手数プレーン
+        planes[45] = min(self.move_count / MAX_MOVES, 1.0)
 
         return planes
 
