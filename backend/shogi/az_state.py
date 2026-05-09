@@ -410,3 +410,66 @@ def _no_legal_moves(state: AZState) -> bool:
 def initial_state() -> AZState:
     """平手初期局面を返す"""
     return AZState()
+
+
+# --------------------------------------------------------------------------
+# USI / SFEN パーサ
+# --------------------------------------------------------------------------
+_USI_PIECE = {'P': P, 'L': L, 'N': N, 'S': S, 'G': G, 'B': B, 'R': R}
+
+
+def _usi_sq(file_char: str, rank_char: str):
+    """USI座標文字 → (y, x)。例: '6','i' → (8, 3)"""
+    x = 9 - int(file_char)
+    y = ord(rank_char) - ord('a')
+    return y, x
+
+
+def _parse_usi_move(move_str: str):
+    """
+    USI手表記 → AZState move形式。
+    例: '6i7h'  → ('board', 8, 3, 7, 2, False)
+        '6i7h+' → ('board', 8, 3, 7, 2, True)
+        'P*8g'  → ('drop', 1, 6, 1)
+    """
+    if move_str[1] == '*':
+        piece_type = _USI_PIECE[move_str[0]]
+        ty, tx = _usi_sq(move_str[2], move_str[3])
+        return ('drop', piece_type, ty, tx)
+    else:
+        fy, fx = _usi_sq(move_str[0], move_str[1])
+        ty, tx = _usi_sq(move_str[2], move_str[3])
+        promote = len(move_str) == 5 and move_str[4] == '+'
+        return ('board', fy, fx, ty, tx, promote)
+
+
+def state_from_sfen_line(line: str) -> AZState:
+    """
+    'startpos moves ...' 形式の1行 → AZState。
+    手を全て適用した局面を返す。
+    """
+    parts = line.strip().split()
+    state = initial_state()
+    if len(parts) >= 3 and parts[1] == 'moves':
+        for move_str in parts[2:]:
+            move = _parse_usi_move(move_str)
+            state = state.play(move)
+    return state
+
+
+def load_opening_states(sfen_path: str) -> list:
+    """
+    SFENファイルを読み込み、各行の局面（AZState）のリストを返す。
+    パース失敗した行はスキップする。
+    """
+    states = []
+    with open(sfen_path, encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                states.append(state_from_sfen_line(line))
+            except Exception:
+                pass
+    return states
