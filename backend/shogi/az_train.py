@@ -20,13 +20,14 @@ import json
 import random
 import sys
 import time
+from datetime import datetime
 import numpy as np
 import torch
 import torch.nn.functional as F
 from collections import deque
 from typing import List, Tuple
 
-from az_state  import AZState, ACTION_SIZE, initial_state
+from az_state  import AZState, ACTION_SIZE, initial_state, load_opening_states
 from az_model  import AZNet, save_model, load_model, MODEL_PATH, CKPT_DIR, model_summary
 from az_mcts   import MCTS
 
@@ -42,13 +43,13 @@ Sample = Tuple[np.ndarray, np.ndarray, float]
 # --------------------------------------------------------------------------
 DEFAULT_CFG: dict = dict(
     # ── 自己対局 ──────────────────────────────
-    num_iterations   = 25,   # 学習イテレーション数 100
-    games_per_iter   = 50,    # 1イテレーションあたりの自己対局数
+    num_iterations   = 1,   # 学習イテレーション数 100
+    games_per_iter   = 3,    # 1イテレーションあたりの自己対局数
     num_simulations  = 20,   # 1手あたりの MCTS シミュレーション数
     max_moves        = 300,   # 1局の最大手数（超えたら引き分け）
     temp_threshold   = 30,    # この手数以降は temperature=0 (確定的選択)
     # ── 学習 ──────────────────────────────────
-    batch_size       = 256,
+    batch_size       = 1,
     epochs_per_iter  = 5,
     lr               = 0.001,
     weight_decay     = 1e-4,
@@ -56,8 +57,9 @@ DEFAULT_CFG: dict = dict(
     # ── チェックポイント ─────────────────────
     checkpoint_every = 10,   # N イテレーションごとに保存
     device           = 'mps',
+    # ── 開局ファイル ──────────────────────────
+    opening_book     = '/Users/yamakigakuto/dev/shogi/backend/storage/opening_sfen/aoba26523.sfen',
 )
-
 
 # --------------------------------------------------------------------------
 # リプレイバッファ
@@ -82,7 +84,7 @@ class ReplayBuffer:
 # --------------------------------------------------------------------------
 # 自己対局
 # --------------------------------------------------------------------------
-def self_play_game(mcts: MCTS, cfg: dict) -> List[Sample]:
+def self_play_game(mcts: MCTS, cfg: dict, opening_states: list = None) -> List[Sample]:
     """
     MCTS を使って 1 局自己対局し、学習サンプルのリストを返す。
 
@@ -91,24 +93,36 @@ def self_play_game(mcts: MCTS, cfg: dict) -> List[Sample]:
     List of (state_tensor, mcts_policy, game_result)
     game_result は局面のプレイヤー視点: +1=勝ち, -1=負け, 0=引き分け
     """
-    state    = initial_state()
+    if opening_states:
+        opening_idx = random.randrange(len(opening_states))
+        state = opening_states[opening_idx]
+    else:
+        opening_idx = -1
+        state = initial_state()
     history: List[Tuple[np.ndarray, np.ndarray, int]] = []
     # history 要素: (tensor, policy, player_at_step)
+
+    t_legal = 0.0   # legal_moves() の累計時間
+    t_mcts  = 0.0   # mcts.search() の累計時間
 
     for move_num in range(cfg['max_moves']):
         # 序盤は temperature=1 で多様性、中盤以降は greedy
         temperature = 1.0 if move_num < cfg['temp_threshold'] else 0.0
 
+        _t = time.time()
         legal = state.legal_moves()
+        t_legal += time.time() - _t
         if not legal:
             break  # 詰み
 
+        _t = time.time()
         policy, _ = mcts.search(
             state,
             num_simulations = cfg['num_simulations'],
             temperature     = temperature,
             add_noise       = True,
         )
+        t_mcts += time.time() - _t
 
         # ポリシーから手を選択（0 のときは一様分布にフォールバック）
         actions = [state.encode_move(m) for m in legal]
@@ -131,7 +145,8 @@ def self_play_game(mcts: MCTS, cfg: dict) -> List[Sample]:
         result = float(winner * player)  # そのプレイヤー視点のバリュー
         samples.append((tensor, policy, result))
 
-    return samples
+    timing = {'legal_moves': t_legal, 'mcts': t_mcts}
+    return samples, opening_idx, timing
 
 
 # --------------------------------------------------------------------------
@@ -207,6 +222,12 @@ def train(cfg: dict = None) -> AZNet:
     buf  = ReplayBuffer(c['buffer_size'])
     mcts = MCTS(model, device=device)
 
+    opening_states = None
+    if c.get('opening_book'):
+        print(f"  開局ファイル読み込み中: {c['opening_book']}")
+        opening_states = load_opening_states(c['opening_book'])
+        print(f"  開局局面数: {len(opening_states)}")
+
     os.makedirs(CKPT_DIR, exist_ok=True)
 
     train_start = time.time()
@@ -219,27 +240,37 @@ def train(cfg: dict = None) -> AZNet:
         # ── 自己対局フェーズ ──────────────────────────────────────────
         new_samples: List[Sample] = []
         wins = draws = losses = 0
+        sum_t_legal = sum_t_mcts = 0.0
+        selfplay_start = time.time()
 
         for g in range(c['games_per_iter']):
-            samples = self_play_game(mcts, c)
+            samples, opening_idx, timing = self_play_game(mcts, c, opening_states)
             new_samples.extend(samples)
+            sum_t_legal += timing['legal_moves']
+            sum_t_mcts  += timing['mcts']
             if samples:
                 last_result = samples[-1][2]   # 最終手のプレイヤー視点
                 if   last_result > 0: wins   += 1
                 elif last_result < 0: losses += 1
                 else:                  draws  += 1
             # 進捗表示
-            print(f"  対局 {g+1:3d}/{c['games_per_iter']}  "
+            opening_str = f"開局#{opening_idx}" if opening_idx >= 0 else "初期局面"
+            print(f"  対局 {g+1:3d}/{c['games_per_iter']}  {opening_str}  "
                   f"手数={len(samples)}  W/D/L={wins}/{draws}/{losses}", end='\r')
 
+        selfplay_elapsed = time.time() - selfplay_start
         buf.push(new_samples)
         print(f"\n  バッファ: {len(buf)} サンプル")
+        print(f"  [時間] 自己対局合計: {selfplay_elapsed:.1f}s"
+              f"  └ legal_moves: {sum_t_legal:.1f}s ({100*sum_t_legal/selfplay_elapsed:.0f}%)"
+              f"  mcts.search: {sum_t_mcts:.1f}s ({100*sum_t_mcts/selfplay_elapsed:.0f}%)")
 
         # ── 学習フェーズ ──────────────────────────────────────────────
         if len(buf) < c['batch_size']:
             print("  バッファ不足のためスキップ")
             continue
 
+        train_start_phase = time.time()
         total_p = total_v = 0.0
         for _ in range(c['epochs_per_iter']):
             batch      = buf.sample(c['batch_size'])
@@ -247,12 +278,15 @@ def train(cfg: dict = None) -> AZNet:
             total_p   += pl
             total_v   += vl
 
+        train_elapsed = time.time() - train_start_phase
         n = c['epochs_per_iter']
-        print(f"  学習: policy_loss={total_p/n:.4f}  value_loss={total_v/n:.4f}")
+        print(f"  学習: policy_loss={total_p/n:.4f}  value_loss={total_v/n:.4f}"
+              f"  [{train_elapsed:.1f}s]")
 
         # ── チェックポイント保存 ──────────────────────────────────────
         if iteration % c['checkpoint_every'] == 0:
-            ckpt = os.path.join(CKPT_DIR, f'az_iter{iteration:04d}.pth')
+            ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+            ckpt = os.path.join(CKPT_DIR, f'az_iter{iteration:04d}_{ts}.pth')
             torch.save(model.state_dict(), ckpt)
             print(f"  チェックポイント: {ckpt}")
 
@@ -261,10 +295,12 @@ def train(cfg: dict = None) -> AZNet:
         remaining = iter_elapsed * (c['num_iterations'] - iteration)
         print(f"  時間: {iter_elapsed:.1f}s / 経過: {elapsed_total/60:.1f}min / 残り約: {remaining/60:.1f}min")
 
-    save_model(model)
+    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+    final_path = MODEL_PATH.replace('.pth', f'_{ts}.pth')
+    save_model(model, path=final_path)
     total_elapsed = time.time() - train_start
     print(f"\n{'='*60}")
-    print(f"学習完了: {MODEL_PATH}")
+    print(f"学習完了: {final_path}")
     print(f"総学習時間: {total_elapsed/60:.1f}min ({total_elapsed:.0f}s)")
     return model
 
