@@ -165,7 +165,8 @@ class AZState:
     player : 1(先手) or -1(後手)  ← 手番
     """
 
-    __slots__ = ('board', 'hands', 'player', 'history', 'move_count')
+    __slots__ = ('board', 'hands', 'player', 'history', 'move_count',
+                 '_hash_cache', '_legal_cache', '_repeat_count')
 
     def __init__(self, board=None, hands=None, player: int = 1, history=None, move_count: int = 0):
         if board is None:
@@ -185,16 +186,23 @@ class AZState:
         self.history: list = list(history) if history is not None else []
         self.move_count: int = move_count
 
+        # キャッシュ（AZState はイミュータブルなので一度計算すれば変わらない）
+        self._hash_cache   = None
+        self._legal_cache  = None
+        self._repeat_count = None
+
     # ------------------------------------------------------------------
     # 局面ハッシュ（千日手検出用）
     # ------------------------------------------------------------------
     def _hash(self) -> tuple:
-        """盤面・持ち駒・手番をまとめたハッシュキーを返す。"""
-        hands_key = (
-            tuple(self.hands[1][p]  for p in HAND_TYPES),
-            tuple(self.hands[-1][p] for p in HAND_TYPES),
-        )
-        return (self.board.tobytes(), hands_key, self.player)
+        """盤面・持ち駒・手番をまとめたハッシュキーを返す。（キャッシュ済み）"""
+        if self._hash_cache is None:
+            hands_key = (
+                tuple(self.hands[1][p]  for p in HAND_TYPES),
+                tuple(self.hands[-1][p] for p in HAND_TYPES),
+            )
+            self._hash_cache = (self.board.tobytes(), hands_key, self.player)
+        return self._hash_cache
 
     # ------------------------------------------------------------------
     # 手生成（内部）
@@ -258,12 +266,15 @@ class AZState:
     # ------------------------------------------------------------------
     def legal_moves(self) -> list:
         """
-        合法手リスト。
+        合法手リスト。（結果をキャッシュ）
 
         各要素:
             ('board', fy, fx, ty, tx, promote)
             ('drop',  piece_type, ty, tx)
         """
+        if self._legal_cache is not None:
+            return self._legal_cache
+
         moves = []
 
         # ── 盤上の手 ──────────────────────────────────────────────────
@@ -284,6 +295,7 @@ class AZState:
                     continue
             moves.append(('drop', pt, ty, tx))
 
+        self._legal_cache = moves
         return moves
 
     def play(self, move) -> 'AZState':
@@ -328,14 +340,16 @@ class AZState:
         """
         planes = np.zeros((INPUT_CHANNELS, 9, 9), dtype=np.float32)
 
-        # 盤面プレーン
-        for y in range(9):
-            for x in range(9):
-                v = int(self.board[y][x])
-                if v > 0:
-                    planes[v - 1, y, x] = 1.0          # 先手: ch 0..13
-                elif v < 0:
-                    planes[14 + (-v - 1), y, x] = 1.0  # 後手: ch 14..27
+        # 盤面プレーン（ベクトル化）
+        board = self.board
+        pos_ys, pos_xs = np.where(board > 0)
+        if len(pos_ys):
+            ch = board[pos_ys, pos_xs].astype(np.intp) - 1          # 先手: ch 0..13
+            planes[ch, pos_ys, pos_xs] = 1.0
+        neg_ys, neg_xs = np.where(board < 0)
+        if len(neg_ys):
+            ch = 14 + (-board[neg_ys, neg_xs]).astype(np.intp) - 1  # 後手: ch 14..27
+            planes[ch, neg_ys, neg_xs] = 1.0
 
         # 持ち駒プレーン（各面を count/max で均一に塗りつぶす）
         for i, pt in enumerate(HAND_TYPES):
@@ -350,11 +364,12 @@ class AZState:
         if self.player == 1:
             planes[42] = 1.0
 
-        # 繰り返しプレーン（千日手検出）
-        repeat_count = self.history.count(self._hash())
-        if repeat_count >= 1:
+        # 繰り返しプレーン（千日手検出、キャッシュ済み）
+        if self._repeat_count is None:
+            self._repeat_count = self.history.count(self._hash())
+        if self._repeat_count >= 1:
             planes[43] = 1.0
-        if repeat_count >= 2:
+        if self._repeat_count >= 2:
             planes[44] = 1.0
 
         # 総手数プレーン

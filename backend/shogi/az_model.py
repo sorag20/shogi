@@ -5,7 +5,7 @@ AlphaZero 用 ResNet（ポリシー＋バリューヘッド）
   - フィルタ数: 128  （AlphaZero は 256）
   - 残差ブロック: 6  （AlphaZero は 19 or 39）
 
-入力  : (batch, 43, 9, 9)   ← AZState.to_tensor() の出力
+入力  : (batch, 46, 9, 9)   ← AZState.to_tensor() の出力
 出力  :
   policy : (batch, 13689)    ← softmax 前のロジット
   value  : (batch, 1)        ← tanh 済み [-1, 1]

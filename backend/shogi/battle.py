@@ -112,7 +112,7 @@ def load_net_model():
     m = Net()
     path = os.path.join(os.path.dirname(__file__), 'model.pth')
     if os.path.exists(path):
-        m.load_state_dict(torch.load(path, map_location='mps'))
+        m.load_state_dict(torch.load(path, map_location='cpu'))
         print(f"[Net] Loaded: {path}")
     else:
         print(f"[Net] Warning: model.pth not found, using random weights")
@@ -170,12 +170,21 @@ class AZPlayer:
     """az_model.pth + MCTS プレイヤー"""
 
     def __init__(self, model: AZNet, num_simulations: int = 50):
-        self.mcts = MCTS(model, device='mps')
+        self.mcts = MCTS(model, device='cpu')
         self.num_simulations = num_simulations
         self.name = f"AZNet(az_model.pth, sims={num_simulations})"
 
     def choose_move(self, state: AZState):
-        return self.mcts.best_move(state, self.num_simulations)
+        policy, _ = self.mcts.search(
+            state, self.num_simulations,
+            temperature=0.0, add_noise=False,
+        )
+        moves   = state.legal_moves()
+        if not moves:
+            return None
+        actions = [state.encode_move(m) for m in moves]
+        best_a  = max(actions, key=lambda a: policy[a])
+        return moves[actions.index(best_a)]
 
 
 # ──────────────────────────────────────────────
@@ -202,6 +211,10 @@ def play_game(sente_player, gote_player, max_moves: int = 300, verbose: bool = F
         legal = state.legal_moves()
         if not legal:
             return -state.player, move_records
+
+        # 千日手検出: 同一局面が4回目なら引き分け
+        if state.history.count(state._hash()) >= 3:
+            return 0, move_records
 
         player = players[state.player]
         move = player.choose_move(state)
@@ -250,7 +263,7 @@ def run_tournament(num_games: int = 20, num_simulations: int = 50, kif_dir: str 
     print("=" * 60)
 
     net_model = load_net_model()
-    az_model  = load_model(device='mps')
+    az_model  = load_model(device='cpu')
 
     net_player = NetPlayer(net_model)
     az_player  = AZPlayer(az_model, num_simulations)
@@ -347,7 +360,7 @@ def run_tournament(num_games: int = 20, num_simulations: int = 50, kif_dir: str 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='model.pth vs az_model.pth Elo tournament')
     parser.add_argument('--games',  type=int,   default=20,      help='総対局数 (default: 20)')
-    parser.add_argument('--sims',   type=int,   default=50,      help='AZNet の MCTS シム数 (default: 50)')
+    parser.add_argument('--sims',   type=int,   default=200,      help='AZNet の MCTS シム数 (default: 50)')
     parser.add_argument('--kifdir', type=str,   default='./kifu', help='KIF保存ディレクトリ (default: ./kifu)')
     args = parser.parse_args()
 

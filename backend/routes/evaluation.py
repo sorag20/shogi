@@ -3,6 +3,8 @@ import numpy as np
 import sys
 import os
 from datetime import datetime
+import az_state as _az_state_mod
+from az_mcts import MCTS
 
 evaluation_bp = Blueprint('evaluation', __name__, url_prefix='/api')
 
@@ -99,7 +101,15 @@ def _get_az_model():
 
 
 def _board_data_to_az_tensor(board_data):
-    """フロントエンドの board JSON を AZ モデル入力テンソル (43, 9, 9) に変換"""
+    """フロントエンドの board JSON を AZ モデル入力テンソル (46, 9, 9) に変換
+    ch  0-13: 先手の駒プレーン
+    ch 14-27: 後手の駒プレーン
+    ch 28-34: 先手の持ち駒
+    ch 35-41: 後手の持ち駒
+    ch 42   : 手番
+    ch 43-44: 千日手検出（フロントエンドからは履歴不明のため 0 固定）
+    ch 45   : 総手数（フロントエンドからは不明のため 0 固定）
+    """
     board_arr = board_to_numpy(board_data)
     player    = 1 if board_data.get('turn', 'black') == 'black' else -1
     hands_raw = board_data.get('hands', {})
@@ -114,7 +124,7 @@ def _board_data_to_az_tensor(board_data):
         if pt:
             hands[-1][pt] = int(count)
 
-    planes = np.zeros((43, 9, 9), dtype=np.float32)
+    planes = np.zeros((46, 9, 9), dtype=np.float32)
     for y in range(9):
         for x in range(9):
             v = int(board_arr[y][x])
@@ -131,6 +141,8 @@ def _board_data_to_az_tensor(board_data):
 
     if player == 1:
         planes[42] = 1.0
+    # ch 43, 44 (千日手): 履歴なしのため 0
+    # ch 45 (手数): 不明のため 0
 
     return planes, player
 
@@ -151,10 +163,9 @@ def _az_evaluate(board_data):
 _AZ_INT_TO_STR = {1: 'pawn', 2: 'lance', 3: 'knight', 4: 'silver', 5: 'gold', 6: 'bishop', 7: 'rook'}
 
 
-def _az_best_move(board_data, num_simulations: int = 200):
-    """MCTS を使った最善手探索。"""
-    import az_state as _az_state_mod
-    from az_mcts import MCTS
+def _az_best_move(board_data, num_simulations: int = 50):
+    """PV-MCTS による最善手探索。"""
+
 
     board_arr = board_to_numpy(board_data)
     player    = 1 if board_data.get('turn', 'black') == 'black' else -1
@@ -175,8 +186,12 @@ def _az_best_move(board_data, num_simulations: int = 200):
         return None
 
     model = _get_az_model()
-    mcts  = MCTS(model, device='mps')
-    return mcts.best_move(state, num_simulations=num_simulations)
+    mcts  = MCTS(model, device='cpu')
+    policy, _ = mcts.search(state, num_simulations, temperature=0.0, add_noise=False)
+    moves   = state.legal_moves()
+    actions = [state.encode_move(m) for m in moves]
+    best_a  = max(actions, key=lambda a: policy[a])
+    return moves[actions.index(best_a)]
 
 
 def hand_score(board_data):

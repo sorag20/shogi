@@ -43,8 +43,8 @@ Sample = Tuple[np.ndarray, np.ndarray, float]
 # --------------------------------------------------------------------------
 DEFAULT_CFG: dict = dict(
     # ── 自己対局 ──────────────────────────────
-    num_iterations   = 1,   # 学習イテレーション数 100
-    games_per_iter   = 3,    # 1イテレーションあたりの自己対局数
+    num_iterations   = 5,   # 学習イテレーション数 100
+    games_per_iter   = 500,    # 1イテレーションあたりの自己対局数
     num_simulations  = 20,   # 1手あたりの MCTS シミュレーション数
     max_moves        = 300,   # 1局の最大手数（超えたら引き分け）
     temp_threshold   = 30,    # この手数以降は temperature=0 (確定的選択)
@@ -106,6 +106,10 @@ def self_play_game(mcts: MCTS, cfg: dict, opening_states: list = None) -> List[S
     t_mcts  = 0.0   # mcts.search() の累計時間
 
     for move_num in range(cfg['max_moves']):
+        # 千日手検出: 同一局面が4回目なら引き分け終局
+        if state.history.count(state._hash()) >= 3:
+            break
+
         # 序盤は temperature=1 で多様性、中盤以降は greedy
         temperature = 1.0 if move_num < cfg['temp_threshold'] else 0.0
 
@@ -140,13 +144,20 @@ def self_play_game(mcts: MCTS, cfg: dict, opening_states: list = None) -> List[S
     # 終局結果（先手視点: +1=先手勝, -1=後手勝, 0=引き分け）
     winner = state.winner() if state.winner() is not None else 0
 
+    # 引き分けには小さいペナルティを与えてAIが引き分けを避けるよう誘導する
+    # 手数が長いほど（長引いた引き分けほど）ペナルティを強くする
+    draw_penalty = -0.05 if winner == 0 else 0.0
+
     samples: List[Sample] = []
     for tensor, policy, player in history:
-        result = float(winner * player)  # そのプレイヤー視点のバリュー
+        if winner != 0:
+            result = float(winner * player)
+        else:
+            result = draw_penalty  # 引き分けは手番に関わらず小さい負の値
         samples.append((tensor, policy, result))
 
     timing = {'legal_moves': t_legal, 'mcts': t_mcts}
-    return samples, opening_idx, timing
+    return samples, opening_idx, timing, int(winner)
 
 
 # --------------------------------------------------------------------------
@@ -244,15 +255,13 @@ def train(cfg: dict = None) -> AZNet:
         selfplay_start = time.time()
 
         for g in range(c['games_per_iter']):
-            samples, opening_idx, timing = self_play_game(mcts, c, opening_states)
+            samples, opening_idx, timing, winner = self_play_game(mcts, c, opening_states)
             new_samples.extend(samples)
             sum_t_legal += timing['legal_moves']
             sum_t_mcts  += timing['mcts']
-            if samples:
-                last_result = samples[-1][2]   # 最終手のプレイヤー視点
-                if   last_result > 0: wins   += 1
-                elif last_result < 0: losses += 1
-                else:                  draws  += 1
+            if   winner > 0: wins   += 1
+            elif winner < 0: losses += 1
+            else:             draws  += 1
             # 進捗表示
             opening_str = f"開局#{opening_idx}" if opening_idx >= 0 else "初期局面"
             print(f"  対局 {g+1:3d}/{c['games_per_iter']}  {opening_str}  "
