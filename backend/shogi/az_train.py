@@ -15,6 +15,7 @@ AlphaZero 自己対局 + 学習ループ（個人開発スケール）
     python az_train.py '{"num_iterations": 5, "games_per_iter": 5, "num_simulations": 50}'
 """
 
+import multiprocessing
 import os
 import json
 import random
@@ -28,7 +29,7 @@ from collections import deque
 from typing import List, Tuple
 
 from az_state  import AZState, ACTION_SIZE, initial_state, load_opening_states
-from az_model  import AZNet, save_model, load_model, MODEL_PATH, CKPT_DIR, model_summary
+from az_model  import AZNet, save_model, MODEL_PATH, CKPT_DIR, model_summary
 from az_mcts   import MCTS
 
 # --------------------------------------------------------------------------
@@ -43,22 +44,24 @@ Sample = Tuple[np.ndarray, np.ndarray, float]
 # --------------------------------------------------------------------------
 DEFAULT_CFG: dict = dict(
     # ── 自己対局 ──────────────────────────────
-    num_iterations   = 5,   # 学習イテレーション数 100
-    games_per_iter   = 500,    # 1イテレーションあたりの自己対局数
-    num_simulations  = 20,   # 1手あたりの MCTS シミュレーション数
-    max_moves        = 300,   # 1局の最大手数（超えたら引き分け）
-    temp_threshold   = 30,    # この手数以降は temperature=0 (確定的選択)
+    num_iterations   = 1,  # 500 × 200 = 100,000 局
+    games_per_iter   = 200,
+    num_simulations  = 20,
+    max_moves        = 300,
+    temp_threshold   = 30,
+    # ── 並列 ──────────────────────────────────
+    num_workers      = None,  # None → os.cpu_count()
     # ── 学習 ──────────────────────────────────
-    batch_size       = 1,
-    epochs_per_iter  = 5,
+    batch_size       = 256,
+    epochs_per_iter  = 10,
     lr               = 0.001,
     weight_decay     = 1e-4,
-    buffer_size      = 100_000,  # リプレイバッファ最大サイズ
+    buffer_size      = 100_000,
     # ── チェックポイント ─────────────────────
-    checkpoint_every = 10,   # N イテレーションごとに保存
+    checkpoint_every = 50,
     device           = 'mps',
     # ── 開局ファイル ──────────────────────────
-    opening_book     = '/Users/yamakigakuto/dev/shogi/backend/storage/opening_sfen/aoba26523.sfen',
+    opening_book     = '/Users/sorag/dev/shogi/backend/storage/opening_sfen/aoba26523.sfen',
 )
 
 # --------------------------------------------------------------------------
@@ -161,6 +164,40 @@ def self_play_game(mcts: MCTS, cfg: dict, opening_states: list = None) -> List[S
 
 
 # --------------------------------------------------------------------------
+# 並列自己対局ワーカー
+# --------------------------------------------------------------------------
+
+# ワーカープロセス内キャッシュ（spawn後、同一プロセスへの2回目以降の呼び出しで再利用）
+_worker_model             = None
+_worker_opening_states    = None
+_worker_opening_book_path = None
+
+def _selfplay_worker(args):
+    """1 局の自己対局を CPU で実行して結果を返す。
+    AZNet と開局局面をプロセス内にキャッシュし、
+    2 タスク目以降はモデル重みの更新だけで済むようにする。
+    """
+    global _worker_model, _worker_opening_states, _worker_opening_book_path
+    model_state_dict, cfg, seed = args
+
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    if _worker_model is None:
+        _worker_model = AZNet()
+    _worker_model.load_state_dict(model_state_dict)
+    _worker_model.eval()
+
+    opening_book_path = cfg.get('opening_book')
+    if opening_book_path and opening_book_path != _worker_opening_book_path:
+        _worker_opening_states = load_opening_states(opening_book_path)
+        _worker_opening_book_path = opening_book_path
+
+    mcts = MCTS(_worker_model, device='cpu')
+    return self_play_game(mcts, {**cfg, 'device': 'cpu'}, _worker_opening_states)
+
+
+# --------------------------------------------------------------------------
 # 学習ステップ
 # --------------------------------------------------------------------------
 def train_step(
@@ -215,23 +252,24 @@ def train(cfg: dict = None) -> AZNet:
     """
     c      = {**DEFAULT_CFG, **(cfg or {})}
     device = c['device']
+    num_workers = c['num_workers'] or (os.cpu_count() or 1)
 
     print("=" * 60)
     print("AlphaZero 将棋 学習開始")
     print(f"  イテレーション数  : {c['num_iterations']}")
-    print(f"  自己対局数/iter   : {c['games_per_iter']}")
+    print(f"  自己対局数/iter   : {c['games_per_iter']}  (合計 {c['num_iterations']*c['games_per_iter']:,} 局)")
     print(f"  MCTS シム数/手    : {c['num_simulations']}")
-    print(f"  デバイス          : {device}")
+    print(f"  デバイス(学習)    : {device}")
+    print(f"  並列ワーカー数    : {num_workers}  (自己対局は CPU)")
     print("=" * 60)
 
-    model  = load_model(device=device)
+    model  = AZNet().to(device)
     model_summary(model)
 
     optimizer = torch.optim.Adam(
         model.parameters(), lr=c['lr'], weight_decay=c['weight_decay']
     )
-    buf  = ReplayBuffer(c['buffer_size'])
-    mcts = MCTS(model, device=device)
+    buf = ReplayBuffer(c['buffer_size'])
 
     opening_states = None
     if c.get('opening_book'):
@@ -243,66 +281,99 @@ def train(cfg: dict = None) -> AZNet:
 
     train_start = time.time()
 
-    for iteration in range(1, c['num_iterations'] + 1):
-        iter_start = time.time()
-        print(f"\n{'─'*50}")
-        print(f"Iteration {iteration}/{c['num_iterations']}")
+    use_parallel = num_workers >= 2
+    if use_parallel:
+        pool = multiprocessing.Pool(num_workers)
+    else:
+        mcts = MCTS(model, device=device)
+        pool = None
 
-        # ── 自己対局フェーズ ──────────────────────────────────────────
-        new_samples: List[Sample] = []
-        wins = draws = losses = 0
-        sum_t_legal = sum_t_mcts = 0.0
-        selfplay_start = time.time()
+    try:
+        for iteration in range(1, c['num_iterations'] + 1):
+            iter_start = time.time()
+            print(f"\n{'─'*50}")
+            print(f"Iteration {iteration}/{c['num_iterations']}")
 
-        for g in range(c['games_per_iter']):
-            samples, opening_idx, timing, winner = self_play_game(mcts, c, opening_states)
-            new_samples.extend(samples)
-            sum_t_legal += timing['legal_moves']
-            sum_t_mcts  += timing['mcts']
-            if   winner > 0: wins   += 1
-            elif winner < 0: losses += 1
-            else:             draws  += 1
-            # 進捗表示
-            opening_str = f"開局#{opening_idx}" if opening_idx >= 0 else "初期局面"
-            print(f"  対局 {g+1:3d}/{c['games_per_iter']}  {opening_str}  "
-                  f"手数={len(samples)}  W/D/L={wins}/{draws}/{losses}", end='\r')
+            # ── 自己対局フェーズ ──────────────────────────────────────────
+            new_samples: List[Sample] = []
+            wins = draws = losses = 0
+            sum_t_legal = sum_t_mcts = 0.0
+            selfplay_start = time.time()
 
-        selfplay_elapsed = time.time() - selfplay_start
-        buf.push(new_samples)
-        print(f"\n  バッファ: {len(buf)} サンプル")
-        print(f"  [時間] 自己対局合計: {selfplay_elapsed:.1f}s"
-              f"  └ legal_moves: {sum_t_legal:.1f}s ({100*sum_t_legal/selfplay_elapsed:.0f}%)"
-              f"  mcts.search: {sum_t_mcts:.1f}s ({100*sum_t_mcts/selfplay_elapsed:.0f}%)")
+            if use_parallel:
+                # 1タスク＝1局。pool が num_workers 本のワーカーに自動分配する。
+                model_state = {k: v.cpu() for k, v in model.state_dict().items()}
+                games = c['games_per_iter']
+                args_list = [
+                    (model_state, c, random.randint(0, 2**31))
+                    for _ in range(games)
+                ]
+                games_done = 0
+                for samples, opening_idx, timing, winner in pool.imap_unordered(_selfplay_worker, args_list):
+                    new_samples.extend(samples)
+                    sum_t_legal += timing['legal_moves']
+                    sum_t_mcts  += timing['mcts']
+                    if   winner > 0: wins   += 1
+                    elif winner < 0: losses += 1
+                    else:            draws  += 1
+                    games_done += 1
+                    opening_str = f"開局#{opening_idx}" if opening_idx >= 0 else "初期局面"
+                    print(f"  対局 {games_done:3d}/{games}  {opening_str}  "
+                          f"W/D/L={wins}/{draws}/{losses}", end='\r')
+            else:
+                for g in range(c['games_per_iter']):
+                    samples, opening_idx, timing, winner = self_play_game(mcts, c, opening_states)
+                    new_samples.extend(samples)
+                    sum_t_legal += timing['legal_moves']
+                    sum_t_mcts  += timing['mcts']
+                    if   winner > 0: wins   += 1
+                    elif winner < 0: losses += 1
+                    else:            draws  += 1
+                    opening_str = f"開局#{opening_idx}" if opening_idx >= 0 else "初期局面"
+                    print(f"  対局 {g+1:3d}/{c['games_per_iter']}  {opening_str}  "
+                          f"手数={len(samples)}  W/D/L={wins}/{draws}/{losses}", end='\r')
 
-        # ── 学習フェーズ ──────────────────────────────────────────────
-        if len(buf) < c['batch_size']:
-            print("  バッファ不足のためスキップ")
-            continue
+            selfplay_elapsed = time.time() - selfplay_start
+            buf.push(new_samples)
+            print(f"\n  バッファ: {len(buf)} サンプル")
+            print(f"  [時間] 自己対局合計: {selfplay_elapsed:.1f}s"
+                  f"  └ legal_moves: {sum_t_legal:.1f}s ({100*sum_t_legal/selfplay_elapsed:.0f}%)"
+                  f"  mcts.search: {sum_t_mcts:.1f}s ({100*sum_t_mcts/selfplay_elapsed:.0f}%)")
 
-        train_start_phase = time.time()
-        total_p = total_v = 0.0
-        for _ in range(c['epochs_per_iter']):
-            batch      = buf.sample(c['batch_size'])
-            pl, vl     = train_step(model, optimizer, batch, device)
-            total_p   += pl
-            total_v   += vl
+            # ── 学習フェーズ ──────────────────────────────────────────────
+            if len(buf) < c['batch_size']:
+                print("  バッファ不足のためスキップ")
+                continue
 
-        train_elapsed = time.time() - train_start_phase
-        n = c['epochs_per_iter']
-        print(f"  学習: policy_loss={total_p/n:.4f}  value_loss={total_v/n:.4f}"
-              f"  [{train_elapsed:.1f}s]")
+            train_start_phase = time.time()
+            total_p = total_v = 0.0
+            for _ in range(c['epochs_per_iter']):
+                batch  = buf.sample(c['batch_size'])
+                pl, vl = train_step(model, optimizer, batch, device)
+                total_p += pl
+                total_v += vl
 
-        # ── チェックポイント保存 ──────────────────────────────────────
-        if iteration % c['checkpoint_every'] == 0:
-            ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-            ckpt = os.path.join(CKPT_DIR, f'az_iter{iteration:04d}_{ts}.pth')
-            torch.save(model.state_dict(), ckpt)
-            print(f"  チェックポイント: {ckpt}")
+            train_elapsed = time.time() - train_start_phase
+            n = c['epochs_per_iter']
+            print(f"  学習: policy_loss={total_p/n:.4f}  value_loss={total_v/n:.4f}"
+                  f"  [{train_elapsed:.1f}s]")
 
-        iter_elapsed = time.time() - iter_start
-        elapsed_total = time.time() - train_start
-        remaining = iter_elapsed * (c['num_iterations'] - iteration)
-        print(f"  時間: {iter_elapsed:.1f}s / 経過: {elapsed_total/60:.1f}min / 残り約: {remaining/60:.1f}min")
+            # ── チェックポイント保存 ──────────────────────────────────────
+            if iteration % c['checkpoint_every'] == 0:
+                ts   = datetime.now().strftime('%Y%m%d_%H%M%S')
+                ckpt = os.path.join(CKPT_DIR, f'az_iter{iteration:04d}_{ts}.pth')
+                torch.save(model.state_dict(), ckpt)
+                print(f"  チェックポイント: {ckpt}")
+
+            iter_elapsed  = time.time() - iter_start
+            elapsed_total = time.time() - train_start
+            remaining     = iter_elapsed * (c['num_iterations'] - iteration)
+            print(f"  時間: {iter_elapsed:.1f}s / 経過: {elapsed_total/60:.1f}min / 残り約: {remaining/60:.1f}min")
+
+    finally:
+        if pool is not None:
+            pool.terminate()
+            pool.join()
 
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
     final_path = MODEL_PATH.replace('.pth', f'_{ts}.pth')
